@@ -812,6 +812,7 @@ fun ConnectionScreen(
         }
     }
 }
+}
 
 /**
  * Green pop-up dialogue / floating confirmation pill shown when a profile is saved.
