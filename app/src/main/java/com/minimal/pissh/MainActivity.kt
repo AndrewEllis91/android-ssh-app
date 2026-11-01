@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.IBinder
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -20,8 +21,10 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import java.io.File
 
 private val TerminalDarkColorScheme = darkColorScheme(
     primary = Color(0xFF58A6FF),
@@ -38,10 +41,6 @@ class MainActivity : ComponentActivity() {
     private val viewModel: TerminalViewModel by viewModels()
     private var isServiceBound = false
 
-    private val notificationPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { /* Ongoing service still runs even if notification permission is declined */ }
-
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val localBinder = binder as? SshForegroundService.LocalBinder ?: return
@@ -56,14 +55,41 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestNotificationPermissionIfNeeded()
+
+        // Capture any uncaught crash to logcat and local file for immediate diagnostics
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            android.util.Log.e("PiSSH_Crash", "Fatal crash: ${throwable.message}", throwable)
+            runCatching {
+                File(filesDir, "last_crash.txt").writeText(throwable.stackTraceToString())
+            }
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
 
         Intent(this, SshForegroundService::class.java).also { intent ->
             bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         }
 
         setContent {
+            val context = LocalContext.current
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+            // Safe lifecycle-aware notification permission request for Android 13+ (Pixel 7 Pro)
+            val notificationLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.RequestPermission()
+            ) { /* Handled gracefully */ }
+
+            LaunchedEffect(Unit) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val granted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (!granted) {
+                        notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                }
+            }
 
             // Dynamically toggle FLAG_KEEP_SCREEN_ON for long-running Pi builds/scripts
             LaunchedEffect(uiState.keepScreenOn) {
@@ -104,24 +130,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-    }
-
     override fun onDestroy() {
         if (isServiceBound) {
             unbindService(serviceConnection)
             isServiceBound = false
         }
-        // If no SSH session is active when exiting, ensure service is stopped
         if (viewModel.uiState.value.connectionStatus != ConnectionStatus.CONNECTED) {
             stopService(Intent(this, SshForegroundService::class.java))
         }

@@ -65,8 +65,8 @@ jobs:
             echo "KEY_PASSWORD=PiSSHRelease2026" >> "$GITHUB_ENV"
           fi
 
-      - name: Build Release APK
-        run: ./gradlew assembleRelease --stacktrace
+      - name: Build APKs (Release & Debug)
+        run: ./gradlew assembleRelease assembleDebug --stacktrace
 
       - name: Determine Release Tag
         id: release_info
@@ -76,27 +76,32 @@ jobs:
           elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
           else
-            TAG="v1.0.0"
+            TAG="v1.0.1"
           fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Rename Release APK
+      - name: Package APKs
         run: |
           cp app/build/outputs/apk/release/app-release.apk "PiSSH-${{ env.TAG }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "PiSSH-${{ env.TAG }}-debug.apk"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PiSSH-${{ env.TAG }}-apk
-          path: PiSSH-${{ env.TAG }}.apk
+          name: PiSSH-${{ env.TAG }}-apks
+          path: |
+            PiSSH-${{ env.TAG }}.apk
+            PiSSH-${{ env.TAG }}-debug.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
           name: PiSSH ${{ env.TAG }}
-          files: PiSSH-${{ env.TAG }}.apk
+          files: |
+            PiSSH-${{ env.TAG }}.apk
+            PiSSH-${{ env.TAG }}-debug.apk
           draft: false
           prerelease: false
           generate_release_notes: true

@@ -376,7 +376,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     init {
         val loadedProfiles = loadProfiles()
-        val lastSelected = prefs.getInt(KEY_SELECTED_PROFILE, 0).coerceIn(0, loadedProfiles.lastIndex)
+        val lastSelected = if (loadedProfiles.isEmpty()) 0 else prefs.getInt(KEY_SELECTED_PROFILE, 0).coerceIn(0, loadedProfiles.lastIndex)
         _uiState.update {
             it.copy(
                 profiles = loadedProfiles,
