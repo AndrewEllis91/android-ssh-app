@@ -29,11 +29,22 @@ import java.io.File
 private val TerminalDarkColorScheme = darkColorScheme(
     primary = Color(0xFF58A6FF),
     onPrimary = Color(0xFF0D1117),
+    primaryContainer = Color(0xFF1F6FEB),
+    onPrimaryContainer = Color(0xFFFFFFFF),
+    secondary = Color(0xFF3FB950),
+    onSecondary = Color(0xFF0D1117),
+    secondaryContainer = Color(0xFF161B22),
+    onSecondaryContainer = Color(0xFFE6EDF3),
+    background = Color(0xFF0D1117),
+    onBackground = Color(0xFFE6EDF3),
     surface = Color(0xFF0D1117),
     onSurface = Color(0xFFE6EDF3),
     surfaceVariant = Color(0xFF161B22),
     onSurfaceVariant = Color(0xFF8B949E),
-    error = Color(0xFFF85149)
+    outline = Color(0xFF30363D),
+    outlineVariant = Color(0xFF21262D),
+    error = Color(0xFFF85149),
+    onError = Color(0xFF0D1117)
 )
 
 class MainActivity : ComponentActivity() {
