@@ -176,7 +176,7 @@ fun ConnectionScreen(
                             enabled = !isConnecting,
                             keyboardOptions = KeyboardOptions(
                                 capitalization = KeyboardCapitalization.None,
-                                autoCorrectEnabled = false,
+                                autoCorrect = false,
                                 keyboardType = KeyboardType.Uri
                             ),
                             modifier = Modifier.weight(0.72f)
@@ -210,7 +210,7 @@ fun ConnectionScreen(
                         enabled = !isConnecting,
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.None,
-                            autoCorrectEnabled = false,
+                            autoCorrect = false,
                             keyboardType = KeyboardType.Ascii
                         ),
                         modifier = Modifier.fillMaxWidth()
@@ -285,7 +285,7 @@ fun ConnectionScreen(
                             maxLines = 7,
                             keyboardOptions = KeyboardOptions(
                                 capitalization = KeyboardCapitalization.None,
-                                autoCorrectEnabled = false,
+                                autoCorrect = false,
                                 keyboardType = KeyboardType.Ascii
                             ),
                             modifier = Modifier.fillMaxWidth()
@@ -309,7 +309,7 @@ fun ConnectionScreen(
                             },
                             keyboardOptions = KeyboardOptions(
                                 capitalization = KeyboardCapitalization.None,
-                                autoCorrectEnabled = false,
+                                autoCorrect = false,
                                 keyboardType = KeyboardType.Password
                             ),
                             modifier = Modifier.fillMaxWidth()
@@ -333,7 +333,7 @@ fun ConnectionScreen(
                             },
                             keyboardOptions = KeyboardOptions(
                                 capitalization = KeyboardCapitalization.None,
-                                autoCorrectEnabled = false,
+                                autoCorrect = false,
                                 keyboardType = KeyboardType.Password
                             ),
                             modifier = Modifier.fillMaxWidth()

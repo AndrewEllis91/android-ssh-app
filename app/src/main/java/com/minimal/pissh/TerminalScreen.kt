@@ -280,7 +280,7 @@ fun TerminalScreen(
                 },
                 keyboardOptions = KeyboardOptions(
                     capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false,
+                    autoCorrect = false,
                     keyboardType = KeyboardType.Ascii,
                     imeAction = ImeAction.Send
                 ),
