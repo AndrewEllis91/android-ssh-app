@@ -6,6 +6,12 @@ import android.content.Intent
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -54,7 +60,7 @@ data class TerminalUiState(
     val connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
     val statusMessage: String? = null,
     val errorMessage: String? = null,
-    val terminalLines: List<String> = listOf(""),
+    val terminalLines: List<AnnotatedString> = listOf(AnnotatedString("")),
     val fontSizeSp: Float = 12f,
     val ctrlLatched: Boolean = false,
     val keepScreenOn: Boolean = false,
@@ -128,10 +134,21 @@ object KeyStoreCrypto {
     }
 }
 
+val DefaultTerminalFgColor = Color(0xFFE6EDF3)
+val FaintTerminalFgColor = Color(0xFF6E7681) // Grey for zsh autosuggestions
+
+data class AnsiStyle(
+    val color: Color = DefaultTerminalFgColor,
+    val bold: Boolean = false,
+    val faint: Boolean = false,
+    val italic: Boolean = false,
+    val underline: Boolean = false
+)
+
 /**
  * Stateful UTF-8 and VT100/ANSI escape sequence processor.
- * Strips CSI (\e[...) and OSC (\e]...\a) sequences while accurately handling
- * carriage return (\r), backspace (\b), clear-to-EOL (\e[K), and clear-screen (\e[2J).
+ * Accurately processes 16-color, 256-color, bold, and faint text styling (used by zsh-autosuggestions),
+ * carriage returns, backspaces, and screen redrawing without wiping scrollback.
  */
 class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
 
@@ -152,12 +169,14 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
     private var state = ParserState.NORMAL
     private val csiParams = StringBuilder(32)
 
-    private val completedLines = ArrayDeque<String>(maxLines)
-    private val currentLine = StringBuilder(128)
+    private val completedLines = ArrayDeque<AnnotatedString>(maxLines)
+    private val currentLineChars = StringBuilder(128)
+    private val currentLineStyles = ArrayList<AnsiStyle>(128)
     private var cursorCol = 0
+    private var currentStyle = AnsiStyle()
 
     @Synchronized
-    fun appendBytes(bytes: ByteArray): List<String> {
+    fun appendBytes(bytes: ByteArray): List<AnnotatedString> {
         if (bytes.isEmpty()) return snapshot()
 
         val combined = if (leftoverBytes.isEmpty()) {
@@ -185,16 +204,18 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
     }
 
     @Synchronized
-    fun processText(text: String): List<String> {
+    fun processText(text: String): List<AnnotatedString> {
         processChars(CharBuffer.wrap(text))
         return snapshot()
     }
 
     @Synchronized
-    fun clear(): List<String> {
+    fun clear(): List<AnnotatedString> {
         completedLines.clear()
-        currentLine.setLength(0)
+        currentLineChars.setLength(0)
+        currentLineStyles.clear()
         cursorCol = 0
+        currentStyle = AnsiStyle()
         state = ParserState.NORMAL
         csiParams.setLength(0)
         leftoverBytes = ByteArray(0)
@@ -203,10 +224,10 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
     }
 
     @Synchronized
-    fun snapshot(): List<String> {
-        val result = ArrayList<String>(completedLines.size + 1)
+    fun snapshot(): List<AnnotatedString> {
+        val result = ArrayList<AnnotatedString>(completedLines.size + 1)
         result.addAll(completedLines)
-        result.add(currentLine.toString())
+        result.add(buildAnnotatedString(currentLineChars, currentLineStyles))
         return result
     }
 
@@ -239,11 +260,12 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
             '\u001B' -> state = ParserState.ESC
             '\r' -> cursorCol = 0
             '\n' -> {
-                completedLines.addLast(currentLine.toString())
+                completedLines.addLast(buildAnnotatedString(currentLineChars, currentLineStyles))
                 while (completedLines.size >= maxLines) {
                     completedLines.removeFirst()
                 }
-                currentLine.setLength(0)
+                currentLineChars.setLength(0)
+                currentLineStyles.clear()
                 cursorCol = 0
             }
             '\b' -> {
@@ -263,13 +285,16 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
     }
 
     private fun writePrintable(ch: Char) {
-        while (currentLine.length < cursorCol) {
-            currentLine.append(' ')
+        while (currentLineChars.length < cursorCol) {
+            currentLineChars.append(' ')
+            currentLineStyles.add(AnsiStyle())
         }
-        if (cursorCol < currentLine.length) {
-            currentLine.setCharAt(cursorCol, ch)
+        if (cursorCol < currentLineChars.length) {
+            currentLineChars.setCharAt(cursorCol, ch)
+            currentLineStyles[cursorCol] = currentStyle
         } else {
-            currentLine.append(ch)
+            currentLineChars.append(ch)
+            currentLineStyles.add(currentStyle)
         }
         cursorCol++
     }
@@ -285,8 +310,10 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
             'c' -> {
                 // Full terminal reset (RIS)
                 completedLines.clear()
-                currentLine.setLength(0)
+                currentLineChars.setLength(0)
+                currentLineStyles.clear()
                 cursorCol = 0
+                currentStyle = AnsiStyle()
                 state = ParserState.NORMAL
             }
             else -> state = ParserState.NORMAL
@@ -297,45 +324,71 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
         if (ch.code in 0x40..0x7E) {
             val params = csiParams.toString()
             when (ch) {
+                'm' -> handleSgr(params)
                 'H', 'f' -> {
                     if (params.isEmpty() || params == "1;1" || params == ";") {
                         cursorCol = 0
                     }
                 }
                 'J' -> {
-                    if (params.isEmpty() || params == "0" || params == "2" || params == "3") {
-                        completedLines.clear()
-                        currentLine.setLength(0)
-                        cursorCol = 0
+                    when (params) {
+                        "2", "3" -> {
+                            // Clear visible screen / scrollback
+                            completedLines.clear()
+                            currentLineChars.setLength(0)
+                            currentLineStyles.clear()
+                            cursorCol = 0
+                        }
+                        else -> {
+                            // "0" or empty: Erase from cursor to end of screen.
+                            // In our stream buffer, clear only from cursorCol onwards to preserve command history!
+                            if (cursorCol < currentLineChars.length) {
+                                currentLineChars.setLength(cursorCol)
+                                while (currentLineStyles.size > cursorCol) {
+                                    currentLineStyles.removeAt(currentLineStyles.size - 1)
+                                }
+                            }
+                        }
                     }
                 }
                 'K' -> {
                     val mode = params.ifEmpty { "0" }
-                    if (mode == "0" && cursorCol < currentLine.length) {
-                        currentLine.setLength(cursorCol)
+                    if (mode == "0" && cursorCol < currentLineChars.length) {
+                        currentLineChars.setLength(cursorCol)
+                        while (currentLineStyles.size > cursorCol) {
+                            currentLineStyles.removeAt(currentLineStyles.size - 1)
+                        }
+                    } else if (mode == "1") {
+                        for (col in 0 until cursorCol.coerceAtMost(currentLineChars.length)) {
+                            currentLineChars.setCharAt(col, ' ')
+                            currentLineStyles[col] = AnsiStyle()
+                        }
                     } else if (mode == "2") {
-                        currentLine.setLength(0)
+                        currentLineChars.setLength(0)
+                        currentLineStyles.clear()
                         cursorCol = 0
                     }
                 }
                 'G' -> {
-                    val targetCol = (params.toIntOrNull() ?: 1).coerceAtLeast(1) - 1
-                    cursorCol = targetCol
+                    cursorCol = (params.toIntOrNull() ?: 1).coerceAtLeast(1) - 1
                 }
                 'C' -> {
-                    val delta = (params.toIntOrNull() ?: 1).coerceAtLeast(1)
-                    cursorCol += delta
+                    cursorCol += (params.toIntOrNull() ?: 1).coerceAtLeast(1)
                 }
                 'D' -> {
                     val delta = (params.toIntOrNull() ?: 1).coerceAtLeast(1)
                     cursorCol = (cursorCol - delta).coerceAtLeast(0)
                 }
                 'P' -> {
-                    // Delete N chars at cursor (used by bash readline on backspace)
                     val count = (params.toIntOrNull() ?: 1).coerceAtLeast(1)
-                    if (cursorCol < currentLine.length) {
-                        val end = (cursorCol + count).coerceAtMost(currentLine.length)
-                        currentLine.delete(cursorCol, end)
+                    if (cursorCol < currentLineChars.length) {
+                        val end = (cursorCol + count).coerceAtMost(currentLineChars.length)
+                        currentLineChars.delete(cursorCol, end)
+                        for (k in cursorCol until end) {
+                            if (cursorCol < currentLineStyles.size) {
+                                currentLineStyles.removeAt(cursorCol)
+                            }
+                        }
                     }
                 }
             }
@@ -345,6 +398,130 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
                 csiParams.append(ch)
             }
         }
+    }
+
+    private fun handleSgr(params: String) {
+        if (params.isEmpty() || params == "0") {
+            currentStyle = AnsiStyle()
+            return
+        }
+        val tokens = params.split(';')
+        var i = 0
+        while (i < tokens.size) {
+            val code = tokens[i].toIntOrNull() ?: 0
+            when (code) {
+                0 -> currentStyle = AnsiStyle()
+                1 -> currentStyle = currentStyle.copy(bold = true)
+                2 -> currentStyle = currentStyle.copy(faint = true, color = FaintTerminalFgColor)
+                3 -> currentStyle = currentStyle.copy(italic = true)
+                4 -> currentStyle = currentStyle.copy(underline = true)
+                22 -> currentStyle = currentStyle.copy(bold = false, faint = false)
+                23 -> currentStyle = currentStyle.copy(italic = false)
+                24 -> currentStyle = currentStyle.copy(underline = false)
+                30 -> currentStyle = currentStyle.copy(color = Color(0xFF484F58))
+                31 -> currentStyle = currentStyle.copy(color = Color(0xFFF85149))
+                32 -> currentStyle = currentStyle.copy(color = Color(0xFF3FB950))
+                33 -> currentStyle = currentStyle.copy(color = Color(0xFFD29922))
+                34 -> currentStyle = currentStyle.copy(color = Color(0xFF58A6FF))
+                35 -> currentStyle = currentStyle.copy(color = Color(0xFFBC8CFF))
+                36 -> currentStyle = currentStyle.copy(color = Color(0xFF39C5CF))
+                37 -> currentStyle = currentStyle.copy(color = Color(0xFFE6EDF3))
+                39 -> currentStyle = currentStyle.copy(color = DefaultTerminalFgColor)
+                90 -> currentStyle = currentStyle.copy(color = FaintTerminalFgColor) // Bright Black / Grey (zsh-autosuggestions)
+                91 -> currentStyle = currentStyle.copy(color = Color(0xFFFF7B72))
+                92 -> currentStyle = currentStyle.copy(color = Color(0xFF56D364))
+                93 -> currentStyle = currentStyle.copy(color = Color(0xFFE3B341))
+                94 -> currentStyle = currentStyle.copy(color = Color(0xFF79C0FF))
+                95 -> currentStyle = currentStyle.copy(color = Color(0xFFD2A8FF))
+                96 -> currentStyle = currentStyle.copy(color = Color(0xFF56D4DD))
+                97 -> currentStyle = currentStyle.copy(color = Color(0xFFFFFFFF))
+                38 -> {
+                    if (i + 2 < tokens.size && tokens[i + 1] == "5") {
+                        val colorIdx = tokens[i + 2].toIntOrNull() ?: 0
+                        currentStyle = currentStyle.copy(color = parse256Color(colorIdx))
+                        i += 2
+                    }
+                }
+            }
+            i++
+        }
+    }
+
+    private fun parse256Color(n: Int): Color {
+        return when (n) {
+            0 -> Color(0xFF0D1117)
+            1 -> Color(0xFFF85149)
+            2 -> Color(0xFF3FB950)
+            3 -> Color(0xFFD29922)
+            4 -> Color(0xFF58A6FF)
+            5 -> Color(0xFFBC8CFF)
+            6 -> Color(0xFF39C5CF)
+            7 -> Color(0xFFE6EDF3)
+            8 -> FaintTerminalFgColor // Color 8 = Grey (zsh-autosuggestions)
+            9 -> Color(0xFFFF7B72)
+            10 -> Color(0xFF56D364)
+            11 -> Color(0xFFE3B341)
+            12 -> Color(0xFF79C0FF)
+            13 -> Color(0xFFD2A8FF)
+            14 -> Color(0xFF56D4DD)
+            15 -> Color(0xFFFFFFFF)
+            in 16..231 -> {
+                val idx = n - 16
+                val r = ((idx / 36) * 51).coerceIn(0, 255)
+                val g = (((idx % 36) / 6) * 51).coerceIn(0, 255)
+                val b = ((idx % 6) * 51).coerceIn(0, 255)
+                Color(r, g, b)
+            }
+            in 232..255 -> {
+                val gray = (8 + (n - 232) * 10).coerceIn(0, 255)
+                Color(gray, gray, gray)
+            }
+            else -> DefaultTerminalFgColor
+        }
+    }
+
+    private fun buildAnnotatedString(chars: CharSequence, styles: List<AnsiStyle>): AnnotatedString {
+        if (chars.isEmpty()) return AnnotatedString("")
+        val builder = AnnotatedString.Builder(chars.toString())
+        var spanStart = 0
+        var currentSpanStyle: AnsiStyle? = null
+
+        for (i in 0 until chars.length) {
+            val style = if (i < styles.size) styles[i] else AnsiStyle()
+            if (style != currentSpanStyle) {
+                if (currentSpanStyle != null && currentSpanStyle != AnsiStyle()) {
+                    builder.addStyle(
+                        toSpanStyle(currentSpanStyle),
+                        spanStart,
+                        i
+                    )
+                }
+                spanStart = i
+                currentSpanStyle = style
+            }
+        }
+        if (currentSpanStyle != null && currentSpanStyle != AnsiStyle()) {
+            builder.addStyle(
+                toSpanStyle(currentSpanStyle),
+                spanStart,
+                chars.length
+            )
+        }
+        return builder.toAnnotatedString()
+    }
+
+    private fun toSpanStyle(style: AnsiStyle): SpanStyle {
+        val effectiveColor = if (style.faint && style.color == DefaultTerminalFgColor) {
+            FaintTerminalFgColor
+        } else {
+            style.color
+        }
+        return SpanStyle(
+            color = effectiveColor,
+            fontWeight = if (style.bold) FontWeight.Bold else FontWeight.Normal,
+            fontStyle = if (style.italic) FontStyle.Italic else FontStyle.Normal,
+            textDecoration = if (style.underline) TextDecoration.Underline else TextDecoration.None
+        )
     }
 
     companion object {
