@@ -1,7 +1,12 @@
 package com.minimal.pissh
 
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AnsiTerminalBufferTest {
@@ -70,5 +75,127 @@ class AnsiTerminalBufferTest {
         assertEquals(0x03.toByte(), AnsiTerminalBuffer.computeCtrlByte('C'))
         assertEquals(0x04.toByte(), AnsiTerminalBuffer.computeCtrlByte('d'))
         assertEquals(0x1A.toByte(), AnsiTerminalBuffer.computeCtrlByte('z'))
+    }
+
+    @Test
+    fun `tracks cursor row and column as characters and newlines are processed`() {
+        val buffer = AnsiTerminalBuffer()
+        assertEquals(0, buffer.currentCursorRow)
+        assertEquals(0, buffer.currentCursorCol)
+        assertTrue(buffer.isCursorVisible)
+
+        buffer.appendBytes("pi@raspberrypi:~$ ".toByteArray(Charsets.UTF_8))
+        assertEquals(0, buffer.currentCursorRow)
+        assertEquals(18, buffer.currentCursorCol)
+
+        buffer.appendBytes("ls\r\n".toByteArray(Charsets.UTF_8))
+        assertEquals(1, buffer.currentCursorRow)
+        assertEquals(0, buffer.currentCursorCol)
+    }
+
+    @Test
+    fun `handles cursor back and forward movement within a line`() {
+        val buffer = AnsiTerminalBuffer()
+        buffer.appendBytes("echo hello".toByteArray(Charsets.UTF_8))
+        assertEquals(10, buffer.currentCursorCol)
+
+        // Move cursor back 5 characters (CSI 5 D)
+        buffer.appendBytes("\u001B[5D".toByteArray(Charsets.UTF_8))
+        assertEquals(5, buffer.currentCursorCol)
+
+        // Move cursor forward 2 characters (CSI 2 C)
+        buffer.appendBytes("\u001B[2C".toByteArray(Charsets.UTF_8))
+        assertEquals(7, buffer.currentCursorCol)
+
+        // Move cursor to column 3 (CSI 3 G -> 0-based col 2)
+        buffer.appendBytes("\u001B[3G".toByteArray(Charsets.UTF_8))
+        assertEquals(2, buffer.currentCursorCol)
+    }
+
+    @Test
+    fun `handles cursor up and down for multi-line block of text navigation and editing`() {
+        val buffer = AnsiTerminalBuffer()
+        buffer.appendBytes("first line\r\nsecond line\r\nthird line".toByteArray(Charsets.UTF_8))
+        assertEquals(2, buffer.currentCursorRow)
+        assertEquals(10, buffer.currentCursorCol)
+
+        // Move cursor up 2 lines (CSI 2 A)
+        buffer.appendBytes("\u001B[2A".toByteArray(Charsets.UTF_8))
+        assertEquals(0, buffer.currentCursorRow)
+
+        // Move cursor to beginning of line (col 0) and edit
+        buffer.appendBytes("\rEDITED ".toByteArray(Charsets.UTF_8))
+        val lines = buffer.snapshot()
+        assertEquals("EDITED line", lines[0].text)
+
+        // Move cursor down 1 line (CSI 1 B)
+        buffer.appendBytes("\u001B[1B".toByteArray(Charsets.UTF_8))
+        assertEquals(1, buffer.currentCursorRow)
+    }
+
+    @Test
+    fun `handles DEC cursor visibility mode 25h and 25l`() {
+        val buffer = AnsiTerminalBuffer()
+        assertTrue(buffer.isCursorVisible)
+
+        // Hide cursor (CSI ? 25 l)
+        buffer.appendBytes("\u001B[?25l".toByteArray(Charsets.UTF_8))
+        assertFalse(buffer.isCursorVisible)
+
+        // Show cursor (CSI ? 25 h)
+        buffer.appendBytes("\u001B[?25h".toByteArray(Charsets.UTF_8))
+        assertTrue(buffer.isCursorVisible)
+    }
+
+    @Test
+    fun `handles cursor save and restore with ESC 7 and 8`() {
+        val buffer = AnsiTerminalBuffer()
+        buffer.appendBytes("hello\r\nworld".toByteArray(Charsets.UTF_8))
+        assertEquals(1, buffer.currentCursorRow)
+        assertEquals(5, buffer.currentCursorCol)
+
+        // Save cursor position (ESC 7)
+        buffer.appendBytes("\u001B7".toByteArray(Charsets.UTF_8))
+
+        // Move to line 0, col 0
+        buffer.appendBytes("\u001B[1A\r".toByteArray(Charsets.UTF_8))
+        assertEquals(0, buffer.currentCursorRow)
+        assertEquals(0, buffer.currentCursorCol)
+
+        // Restore cursor position (ESC 8)
+        buffer.appendBytes("\u001B8".toByteArray(Charsets.UTF_8))
+        assertEquals(1, buffer.currentCursorRow)
+        assertEquals(5, buffer.currentCursorCol)
+    }
+
+    @Test
+    fun `buildLineWithCursor renders block cursor at end of line and inverts existing character`() {
+        val cursorColor = Color(0xFF58A6FF)
+        val cursorTextColor = Color(0xFF0D1117)
+
+        // 1. Cursor at end of line
+        val lineAtEnd = AnnotatedString("pi@raspberrypi:~$ ")
+        val renderedAtEnd = buildLineWithCursor(lineAtEnd, cursorCol = 18, cursorColor = cursorColor, cursorTextColor = cursorTextColor)
+        assertEquals("pi@raspberrypi:~$ █", renderedAtEnd.text)
+        val endCursorSpan = renderedAtEnd.spanStyles.find { it.start == 18 && it.end == 19 }
+        assertNotNull(endCursorSpan)
+        assertEquals(cursorColor, endCursorSpan?.item?.color)
+
+        // 2. Cursor in middle of line on non-space character
+        val lineMid = AnnotatedString("echo hello")
+        val renderedMid = buildLineWithCursor(lineMid, cursorCol = 5, cursorColor = cursorColor, cursorTextColor = cursorTextColor)
+        assertEquals("echo hello", renderedMid.text)
+        val midCursorSpan = renderedMid.spanStyles.find { it.start == 5 && it.end == 6 }
+        assertNotNull(midCursorSpan)
+        assertEquals(cursorColor, midCursorSpan?.item?.background)
+        assertEquals(cursorTextColor, midCursorSpan?.item?.color)
+        assertEquals(FontWeight.Bold, midCursorSpan?.item?.fontWeight)
+
+        // 3. Cursor on a space character
+        val renderedSpace = buildLineWithCursor(lineMid, cursorCol = 4, cursorColor = cursorColor, cursorTextColor = cursorTextColor)
+        assertEquals("echo█hello", renderedSpace.text)
+        val spaceCursorSpan = renderedSpace.spanStyles.find { it.start == 4 && it.end == 5 }
+        assertNotNull(spaceCursorSpan)
+        assertEquals(cursorColor, spaceCursorSpan?.item?.color)
     }
 }

@@ -3,6 +3,12 @@ package com.minimal.pissh
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -27,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -74,6 +81,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -92,10 +100,12 @@ fun ConnectionScreen(
     onUpdateProfile: ((HostProfile) -> HostProfile) -> Unit,
     onSaveProfile: () -> Unit,
     onConnect: () -> Unit,
-    onToggleKeepScreenOn: () -> Unit = {}
+    onToggleKeepScreenOn: () -> Unit = {},
+    onDismissSaveSuccess: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     val profile = uiState.activeProfile
     val isConnecting = uiState.connectionStatus == ConnectionStatus.CONNECTING
 
@@ -140,19 +150,37 @@ fun ConnectionScreen(
                     }
                 },
                 actions = {
+                    val isSaved = !uiState.saveSuccessMessage.isNullOrBlank()
                     TextButton(
                         onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            keyboardController?.hide()
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             onSaveProfile()
                         },
                         enabled = !isConnecting
                     ) {
-                        Text(
-                            text = "Save",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        if (isSaved) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                tint = Color(0xFF4CAF50),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "Saved",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF4CAF50)
+                            )
+                        } else {
+                            Text(
+                                text = "Save",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
 
                     Box {
@@ -167,6 +195,8 @@ fun ConnectionScreen(
                                 text = { Text("Save Profile") },
                                 onClick = {
                                     showOverflowMenu = false
+                                    keyboardController?.hide()
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                     onSaveProfile()
                                 }
                             )
@@ -202,23 +232,44 @@ fun ConnectionScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    val isSaved = !uiState.saveSuccessMessage.isNullOrBlank()
                     OutlinedButton(
                         onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            keyboardController?.hide()
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             onSaveProfile()
                         },
                         enabled = !isConnecting,
                         shape = RoundedCornerShape(28.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                        border = BorderStroke(
+                            1.dp,
+                            if (isSaved) Color(0xFF4CAF50) else MaterialTheme.colorScheme.outline
+                        ),
                         modifier = Modifier
                             .weight(0.40f)
                             .height(56.dp)
                     ) {
-                        Text(
-                            text = "Save",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        if (isSaved) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                tint = Color(0xFF4CAF50),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "Saved!",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF4CAF50)
+                            )
+                        } else {
+                            Text(
+                                text = "Save",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
 
                     Button(
@@ -283,15 +334,19 @@ fun ConnectionScreen(
             }
         }
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .imePadding()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .imePadding()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
             // Saved Profiles Carousel (Single-tap switching across 4 slots)
             Row(
                 modifier = Modifier
@@ -732,6 +787,99 @@ fun ConnectionScreen(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+        }
+
+        // Green Pop-up Dialogue / Floating Confirmation Pill
+        AnimatedVisibility(
+            visible = !uiState.saveSuccessMessage.isNullOrBlank(),
+            enter = fadeIn(animationSpec = tween(220)) + slideInVertically(
+                animationSpec = tween(250),
+                initialOffsetY = { fullHeight -> fullHeight / 2 }
+            ),
+            exit = fadeOut(animationSpec = tween(220)) + slideOutVertically(
+                animationSpec = tween(250),
+                targetOffsetY = { fullHeight -> fullHeight / 2 }
+            ),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .imePadding()
+                .padding(bottom = 16.dp, start = 16.dp, end = 16.dp)
+        ) {
+            SaveSuccessPopUp(
+                message = uiState.saveSuccessMessage.orEmpty(),
+                onDismiss = onDismissSaveSuccess
+            )
+        }
+    }
+}
+
+/**
+ * Green pop-up dialogue / floating confirmation pill shown when a profile is saved.
+ * Features a high-contrast Material green container, subtle border, drop shadow,
+ * check icon, bold title, message, and tap-to-dismiss support.
+ */
+@Composable
+private fun SaveSuccessPopUp(
+    message: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = Color(0xFF1E4620), // Rich forest emerald green
+        contentColor = Color.White,
+        tonalElevation = 6.dp,
+        shadowElevation = 10.dp,
+        border = BorderStroke(1.5.dp, Color(0xFF4CAF50)),
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable { onDismiss() }
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xFF2E7D32),
+                modifier = Modifier.size(36.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = "Success",
+                        tint = Color(0xFF81C784),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Saved Successfully",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFA5D6A7),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Clear,
+                    contentDescription = "Dismiss",
+                    tint = Color(0xFFA5D6A7),
+                    modifier = Modifier.size(16.dp)
+                )
+            }
         }
     }
 }

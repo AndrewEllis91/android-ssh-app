@@ -61,6 +61,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -73,6 +75,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -107,6 +110,22 @@ fun TerminalScreen(
         )
     }
 
+    // Terminal Cursor Blink: blinks at 500ms when idle, resets to solid immediately on movement or typing
+    var cursorBlinkVisible by remember { mutableStateOf(true) }
+
+    LaunchedEffect(
+        uiState.cursorRow,
+        uiState.cursorCol,
+        uiState.terminalLines.size,
+        uiState.terminalLines.lastOrNull()
+    ) {
+        cursorBlinkVisible = true
+        while (true) {
+            delay(500)
+            cursorBlinkVisible = !cursorBlinkVisible
+        }
+    }
+
     val lineHeightSp = (uiState.fontSizeSp * 1.28f)
     val terminalTextStyle = remember(uiState.fontSizeSp) {
         TextStyle(
@@ -133,10 +152,18 @@ fun TerminalScreen(
         }
     }
 
-    // Auto-scroll to bottom when new terminal lines arrive
-    LaunchedEffect(uiState.terminalLines.size, uiState.terminalLines.lastOrNull()) {
+    // Auto-scroll when new terminal lines arrive or when cursor row moves
+    LaunchedEffect(uiState.terminalLines.size, uiState.terminalLines.lastOrNull(), uiState.cursorRow) {
         if (uiState.terminalLines.isNotEmpty()) {
-            listState.scrollToItem(uiState.terminalLines.lastIndex)
+            val targetIndex = uiState.cursorRow.coerceIn(0, uiState.terminalLines.lastIndex)
+            if (targetIndex >= uiState.terminalLines.size - 2) {
+                listState.scrollToItem(uiState.terminalLines.lastIndex)
+            } else {
+                val visible = listState.layoutInfo.visibleItemsInfo.map { it.index }
+                if (visible.isNotEmpty() && targetIndex !in visible) {
+                    listState.scrollToItem(targetIndex)
+                }
+            }
         }
     }
 
@@ -248,9 +275,21 @@ fun TerminalScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 8.dp)
             ) {
-                itemsIndexed(uiState.terminalLines) { _, line ->
+                itemsIndexed(uiState.terminalLines) { index, line ->
+                    val isCursorLine = (index == uiState.cursorRow) && uiState.cursorVisible && cursorBlinkVisible
+                    val displayLine = if (isCursorLine) {
+                        buildLineWithCursor(
+                            line = line,
+                            cursorCol = uiState.cursorCol,
+                            cursorColor = Color(0xFF58A6FF),
+                            cursorTextColor = Color(0xFF0D1117)
+                        )
+                    } else {
+                        line
+                    }
+
                     Text(
-                        text = line,
+                        text = displayLine,
                         style = terminalTextStyle,
                         softWrap = true,
                         modifier = Modifier.fillMaxWidth()
@@ -478,4 +517,57 @@ private fun handleHardwareKeyEvent(
     }
 
     return false
+}
+
+/**
+ * Renders the terminal cursor at the specified [cursorCol] on the given [line].
+ * If [cursorCol] falls on an existing non-space character, that character's colors are inverted
+ * with [cursorColor] background and [cursorTextColor] foreground.
+ * If [cursorCol] falls on a space or at/past the end of the line, a solid block character '█'
+ * styled in [cursorColor] is rendered to guarantee visibility regardless of font whitespace trimming.
+ */
+fun buildLineWithCursor(
+    line: AnnotatedString,
+    cursorCol: Int,
+    cursorColor: Color = Color(0xFF58A6FF),
+    cursorTextColor: Color = Color(0xFF0D1117)
+): AnnotatedString {
+    val text = line.text
+    val safeCol = cursorCol.coerceAtLeast(0)
+
+    if (safeCol < text.length) {
+        val charAtCursor = text[safeCol]
+        if (charAtCursor == ' ') {
+            val prefix = if (safeCol > 0) line.subSequence(0, safeCol) else AnnotatedString("")
+            val suffix = if (safeCol + 1 < text.length) line.subSequence(safeCol + 1, text.length) else AnnotatedString("")
+            val blockBuilder = AnnotatedString.Builder()
+            blockBuilder.append(prefix)
+            blockBuilder.pushStyle(SpanStyle(color = cursorColor))
+            blockBuilder.append('█')
+            blockBuilder.pop()
+            blockBuilder.append(suffix)
+            return blockBuilder.toAnnotatedString()
+        } else {
+            val builder = AnnotatedString.Builder(line)
+            builder.addStyle(
+                SpanStyle(
+                    background = cursorColor,
+                    color = cursorTextColor,
+                    fontWeight = FontWeight.Bold
+                ),
+                start = safeCol,
+                end = safeCol + 1
+            )
+            return builder.toAnnotatedString()
+        }
+    } else {
+        val builder = AnnotatedString.Builder(line)
+        if (safeCol > text.length) {
+            builder.append(" ".repeat(safeCol - text.length))
+        }
+        builder.pushStyle(SpanStyle(color = cursorColor))
+        builder.append('█')
+        builder.pop()
+        return builder.toAnnotatedString()
+    }
 }

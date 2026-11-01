@@ -178,6 +178,7 @@ class MainActivity : ComponentActivity() {
                             onSelectProfile = viewModel::selectProfile,
                             onUpdateProfile = viewModel::updateActiveProfile,
                             onSaveProfile = viewModel::saveActiveProfile,
+                            onDismissSaveSuccess = viewModel::dismissSaveSuccess,
                             onConnect = viewModel::connect,
                             onToggleKeepScreenOn = viewModel::toggleKeepScreenOn
                         )
