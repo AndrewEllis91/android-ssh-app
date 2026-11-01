@@ -39,18 +39,30 @@ jobs:
           fi
           chmod +x gradlew
 
-      - name: Prepare Signing Keystore (if configured)
+      - name: Prepare Signing Keystore
         id: prepare_keystore
         run: |
           if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "Found signing secrets. Decoding keystore..."
+            echo "Found custom signing secrets. Decoding keystore..."
             echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/release.keystore"
             echo "KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
             echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
             echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
           else
-            echo "No custom keystore secrets provided. Falling back to debug signature."
+            echo "No custom secrets provided. Generating release keystore..."
+            keytool -genkeypair -v -keystore "$RUNNER_TEMP/release.keystore" \
+              -alias pissh \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "PiSSHRelease2026" \
+              -keypass "PiSSHRelease2026" \
+              -dname "CN=AndrewEllis,OU=Personal,O=PiSSH,C=US"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=PiSSHRelease2026" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=pissh" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=PiSSHRelease2026" >> "$GITHUB_ENV"
           fi
 
       - name: Build Release APK
