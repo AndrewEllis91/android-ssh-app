@@ -52,7 +52,7 @@ class AnsiTerminalBufferTest {
         val promptAndSuggestion = "\u001B[32mpi\u001B[m@\u001B[34mhost\u001B[m$ git st\u001B[38;5;8matus\u001B[m"
         val lines = buffer.appendBytes(promptAndSuggestion.toByteArray(Charsets.UTF_8))
         assertEquals("pi@host$ git status", lines[0].text)
-        val atusSpan = lines[0].spanStyles.find { it.start == "pi@host$ git ".length }
+        val atusSpan = lines[0].spanStyles.find { it.start == "pi@host$ git st".length }
         assertNotNull(atusSpan)
         assertEquals(FaintTerminalFgColor, atusSpan?.item?.color)
     }
@@ -126,7 +126,7 @@ class AnsiTerminalBufferTest {
         // Move cursor to beginning of line (col 0) and edit
         buffer.appendBytes("\rEDITED ".toByteArray(Charsets.UTF_8))
         val lines = buffer.snapshot()
-        assertEquals("EDITED line", lines[0].text)
+        assertEquals("EDITED ine", lines[0].text)
 
         // Move cursor down 1 line (CSI 1 B)
         buffer.appendBytes("\u001B[1B".toByteArray(Charsets.UTF_8))

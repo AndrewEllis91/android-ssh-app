@@ -58,6 +58,10 @@ enum class ConnectionStatus {
 data class TerminalUiState(
     val profiles: List<HostProfile> = emptyList(),
     val selectedProfileIndex: Int = 0,
+    val isEditorOpen: Boolean = false,
+    val isCreatingNewProfile: Boolean = false,
+    val editingProfile: HostProfile? = null,
+    val connectingProfileId: Int? = null,
     val connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
     val statusMessage: String? = null,
     val errorMessage: String? = null,
@@ -75,8 +79,8 @@ data class TerminalUiState(
     val ptyHeightPx: Int = 0
 ) {
     val activeProfile: HostProfile
-        get() = profiles.getOrElse(selectedProfileIndex) {
-            HostProfile(0, "Pi (Tailscale)", "100.64.0.1", 22, "pi", AuthType.KEY)
+        get() = editingProfile ?: profiles.getOrElse(selectedProfileIndex) {
+            HostProfile(0, "New Connection", "", 22, "pi", AuthType.KEY)
         }
 }
 
@@ -121,8 +125,8 @@ object KeyStoreCrypto {
 
     private fun getOrCreateSecretKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        val existing = keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.Entry
-        if (existing is KeyStore.SecretKeyEntry) {
+        val existing = keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
+        if (existing != null) {
             return existing.secretKey
         }
         val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
@@ -686,11 +690,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     init {
         val loadedProfiles = loadProfiles()
-        val lastSelected = if (loadedProfiles.isEmpty()) 0 else prefs.getInt(KEY_SELECTED_PROFILE, 0).coerceIn(0, loadedProfiles.lastIndex)
+        val lastSelectedId = prefs.getInt(KEY_SELECTED_PROFILE, 0)
+        val selectedIdx = loadedProfiles.indexOfFirst { it.id == lastSelectedId }.let { if (it >= 0) it else 0 }
         _uiState.update {
             it.copy(
                 profiles = loadedProfiles,
-                selectedProfileIndex = lastSelected
+                selectedProfileIndex = selectedIdx
             )
         }
     }
@@ -738,11 +743,92 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     private var saveSuccessJob: Job? = null
 
+    fun startCreateProfile() {
+        val nextId = getNextProfileId()
+        val newProfile = HostProfile(
+            id = nextId,
+            label = "",
+            host = "",
+            port = 22,
+            username = "pi",
+            authType = AuthType.KEY
+        )
+        _uiState.update {
+            it.copy(
+                isEditorOpen = true,
+                isCreatingNewProfile = true,
+                editingProfile = newProfile,
+                errorMessage = null,
+                statusMessage = null
+            )
+        }
+    }
+
+    fun startEditProfile(profileId: Int) {
+        val profiles = _uiState.value.profiles
+        val index = profiles.indexOfFirst { it.id == profileId }
+        val targetProfile = if (index >= 0) profiles[index] else return
+        saveSuccessJob?.cancel()
+        _uiState.update {
+            it.copy(
+                selectedProfileIndex = index,
+                isEditorOpen = true,
+                isCreatingNewProfile = false,
+                editingProfile = targetProfile.copy(),
+                errorMessage = null,
+                statusMessage = null,
+                saveSuccessMessage = null
+            )
+        }
+    }
+
+    fun closeEditor() {
+        _uiState.update {
+            it.copy(
+                isEditorOpen = false,
+                isCreatingNewProfile = false,
+                editingProfile = null,
+                errorMessage = null
+            )
+        }
+    }
+
+    fun deleteProfile(profileId: Int) {
+        deleteProfileFromPrefs(profileId)
+        _uiState.update { state ->
+            val updatedList = state.profiles.filter { it.id != profileId }
+            val newIndex = if (updatedList.isEmpty()) 0 else state.selectedProfileIndex.coerceIn(0, updatedList.lastIndex)
+            state.copy(
+                profiles = updatedList,
+                selectedProfileIndex = newIndex,
+                isEditorOpen = false,
+                isCreatingNewProfile = false,
+                editingProfile = null,
+                statusMessage = "Connection deleted",
+                errorMessage = null
+            )
+        }
+    }
+
+    fun connectProfile(profileId: Int) {
+        val profiles = _uiState.value.profiles
+        val index = profiles.indexOfFirst { it.id == profileId }
+        if (index >= 0) {
+            _uiState.update {
+                it.copy(
+                    selectedProfileIndex = index,
+                    connectingProfileId = profileId
+                )
+            }
+            connect()
+        }
+    }
+
     fun selectProfile(index: Int) {
         val profiles = _uiState.value.profiles
         if (index !in profiles.indices) return
         saveSuccessJob?.cancel()
-        prefs.edit().putInt(KEY_SELECTED_PROFILE, index).apply()
+        prefs.edit().putInt(KEY_SELECTED_PROFILE, profiles[index].id).apply()
         _uiState.update {
             it.copy(
                 selectedProfileIndex = index,
@@ -755,23 +841,40 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     fun updateActiveProfile(transform: (HostProfile) -> HostProfile) {
         _uiState.update { state ->
-            val currentList = state.profiles.toMutableList()
-            val idx = state.selectedProfileIndex
-            if (idx in currentList.indices) {
-                currentList[idx] = transform(currentList[idx])
+            if (state.editingProfile != null) {
+                state.copy(editingProfile = transform(state.editingProfile), errorMessage = null)
+            } else {
+                val currentList = state.profiles.toMutableList()
+                val idx = state.selectedProfileIndex
+                if (idx in currentList.indices) {
+                    currentList[idx] = transform(currentList[idx])
+                }
+                state.copy(profiles = currentList, errorMessage = null)
             }
-            state.copy(profiles = currentList, errorMessage = null)
         }
     }
 
     fun saveActiveProfile(): Boolean {
         return try {
             val state = _uiState.value
-            val profile = state.activeProfile
-            saveProfileToPrefs(profile)
-            val labelText = profile.label.ifBlank { "Host ${profile.id + 1}" }
+            val profileToSave = state.editingProfile ?: state.activeProfile
+            saveProfileToPrefs(profileToSave)
+            val updatedList = state.profiles.toMutableList()
+            val existingIndex = updatedList.indexOfFirst { it.id == profileToSave.id }
+            if (existingIndex >= 0) {
+                updatedList[existingIndex] = profileToSave
+            } else {
+                updatedList.add(profileToSave)
+            }
+            val newIndex = updatedList.indexOfFirst { it.id == profileToSave.id }.coerceAtLeast(0)
+            val labelText = profileToSave.label.ifBlank { "Host ${profileToSave.id + 1}" }
             _uiState.update {
                 it.copy(
+                    profiles = updatedList,
+                    selectedProfileIndex = newIndex,
+                    isEditorOpen = false,
+                    isCreatingNewProfile = false,
+                    editingProfile = null,
                     saveSuccessMessage = "Saved profile \"$labelText\"",
                     errorMessage = null
                 )
@@ -796,25 +899,45 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     fun connect() {
         val service = boundService
         if (service == null) {
-            _uiState.update { it.copy(errorMessage = "SSH background service is still initializing. Try again.") }
+            _uiState.update {
+                it.copy(
+                    connectingProfileId = null,
+                    errorMessage = "SSH background service is still initializing. Try again."
+                )
+            }
             return
         }
 
         val state = _uiState.value
-        val profile = state.activeProfile
+        val profile = state.editingProfile ?: state.activeProfile
         if (profile.host.isBlank()) {
-            _uiState.update { it.copy(errorMessage = "Hostname or Tailscale IP is required.") }
+            _uiState.update {
+                it.copy(
+                    connectingProfileId = null,
+                    errorMessage = "Hostname or Tailscale IP is required."
+                )
+            }
             return
         }
         if (profile.username.isBlank()) {
-            _uiState.update { it.copy(errorMessage = "Username is required.") }
+            _uiState.update {
+                it.copy(
+                    connectingProfileId = null,
+                    errorMessage = "Username is required."
+                )
+            }
             return
         }
 
         val authMethod = when (profile.authType) {
             AuthType.KEY -> {
                 if (profile.privateKey.isBlank()) {
-                    _uiState.update { it.copy(errorMessage = "Please provide an OpenSSH private key (ed25519 or rsa).") }
+                    _uiState.update {
+                        it.copy(
+                            connectingProfileId = null,
+                            errorMessage = "Please provide an OpenSSH private key (ed25519 or rsa)."
+                        )
+                    }
                     return
                 }
                 AuthMethod.PublicKey(
@@ -824,7 +947,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             }
             AuthType.PASSWORD -> {
                 if (profile.password.isEmpty()) {
-                    _uiState.update { it.copy(errorMessage = "Please enter a password.") }
+                    _uiState.update {
+                        it.copy(
+                            connectingProfileId = null,
+                            errorMessage = "Please enter a password."
+                        )
+                    }
                     return
                 }
                 AuthMethod.Password(profile.password)
@@ -833,9 +961,21 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
         // Persist profile on connect
         saveProfileToPrefs(profile)
+        val updatedProfiles = state.profiles.toMutableList()
+        val existingIndex = updatedProfiles.indexOfFirst { it.id == profile.id }
+        if (existingIndex >= 0) {
+            updatedProfiles[existingIndex] = profile
+        } else {
+            updatedProfiles.add(profile)
+        }
 
         _uiState.update {
             it.copy(
+                profiles = updatedProfiles,
+                isEditorOpen = false,
+                isCreatingNewProfile = false,
+                editingProfile = null,
+                connectingProfileId = profile.id,
                 connectionStatus = ConnectionStatus.CONNECTING,
                 errorMessage = null,
                 statusMessage = "Connecting to ${profile.username}@${profile.host}:${profile.port}...",
@@ -869,6 +1009,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 _uiState.update {
                     it.copy(
                         connectionStatus = ConnectionStatus.CONNECTED,
+                        connectingProfileId = null,
                         statusMessage = null,
                         errorMessage = null
                     )
@@ -877,6 +1018,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 _uiState.update {
                     it.copy(
                         connectionStatus = ConnectionStatus.DISCONNECTED,
+                        connectingProfileId = null,
                         statusMessage = null,
                         errorMessage = "Connection failed: ${err.localizedMessage ?: err.javaClass.simpleName}"
                     )
@@ -895,6 +1037,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         _uiState.update {
             it.copy(
                 connectionStatus = ConnectionStatus.DISCONNECTED,
+                connectingProfileId = null,
                 ctrlLatched = false,
                 statusMessage = null,
                 errorMessage = reason
@@ -983,34 +1126,102 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         sendRawBytes(normalized.toByteArray(Charsets.UTF_8))
     }
 
+    private fun getNextProfileId(): Int {
+        val currentMax = _uiState.value.profiles.maxOfOrNull { it.id } ?: -1
+        val storedNext = prefs.getInt(KEY_NEXT_PROFILE_ID, currentMax + 1)
+        val nextId = maxOf(currentMax + 1, storedNext)
+        prefs.edit().putInt(KEY_NEXT_PROFILE_ID, nextId + 1).apply()
+        return nextId
+    }
+
+    private fun getStoredProfileIds(): List<Int> {
+        val raw = prefs.getString(KEY_PROFILE_IDS, null) ?: return emptyList()
+        return raw.split(",").mapNotNull { it.trim().toIntOrNull() }
+    }
+
     private fun loadProfiles(): List<HostProfile> {
+        val storedIds = getStoredProfileIds()
+        if (prefs.contains(KEY_PROFILE_IDS)) {
+            return storedIds.mapNotNull { id ->
+                loadProfileById(id)
+            }
+        }
+
+        // Migration or first launch
         val defaults = listOf(
             HostProfile(0, "Pi (Tailscale)", "raspberrypi", 22, "pi", AuthType.KEY),
             HostProfile(1, "Pi (Local LAN)", "192.168.1.100", 22, "pi", AuthType.KEY),
             HostProfile(2, "Pi #2 (Tailscale)", "100.100.100.100", 22, "pi", AuthType.PASSWORD),
             HostProfile(3, "Custom Host", "", 22, "pi", AuthType.KEY)
         )
-        return defaults.map { def ->
+
+        val loaded = defaults.mapNotNull { def ->
             val prefix = "profile_${def.id}_"
-            val authName = prefs.getString("${prefix}authType", def.authType.name) ?: def.authType.name
-            val authType = runCatching { AuthType.valueOf(authName) }.getOrDefault(def.authType)
-            HostProfile(
-                id = def.id,
-                label = prefs.getString("${prefix}label", def.label) ?: def.label,
-                host = prefs.getString("${prefix}host", def.host) ?: def.host,
-                port = prefs.getInt("${prefix}port", def.port),
-                username = prefs.getString("${prefix}username", def.username) ?: def.username,
-                authType = authType,
-                password = KeyStoreCrypto.decrypt(prefs.getString("${prefix}password", "") ?: ""),
-                privateKey = KeyStoreCrypto.decrypt(prefs.getString("${prefix}privateKey", "") ?: ""),
-                passphrase = KeyStoreCrypto.decrypt(prefs.getString("${prefix}passphrase", "") ?: "")
-            )
+            val hasCustomData = prefs.contains("${prefix}host") || prefs.contains("${prefix}label")
+            val host = prefs.getString("${prefix}host", def.host) ?: def.host
+            val label = prefs.getString("${prefix}label", def.label) ?: def.label
+
+            // Filter out blank custom host if user never configured it
+            if (!hasCustomData && def.id == 3 && host.isBlank()) {
+                null
+            } else {
+                val authName = prefs.getString("${prefix}authType", def.authType.name) ?: def.authType.name
+                val authType = runCatching { AuthType.valueOf(authName) }.getOrDefault(def.authType)
+                HostProfile(
+                    id = def.id,
+                    label = label,
+                    host = host,
+                    port = prefs.getInt("${prefix}port", def.port),
+                    username = prefs.getString("${prefix}username", def.username) ?: def.username,
+                    authType = authType,
+                    password = KeyStoreCrypto.decrypt(prefs.getString("${prefix}password", "") ?: ""),
+                    privateKey = KeyStoreCrypto.decrypt(prefs.getString("${prefix}privateKey", "") ?: ""),
+                    passphrase = KeyStoreCrypto.decrypt(prefs.getString("${prefix}passphrase", "") ?: "")
+                )
+            }
         }
+
+        val ids = loaded.map { it.id }
+        prefs.edit()
+            .putString(KEY_PROFILE_IDS, ids.joinToString(","))
+            .putInt(KEY_NEXT_PROFILE_ID, (ids.maxOrNull() ?: -1) + 1)
+            .apply()
+
+        return loaded
+    }
+
+    private fun loadProfileById(id: Int): HostProfile? {
+        val prefix = "profile_${id}_"
+        val hasCustomData = prefs.contains("${prefix}host") || prefs.contains("${prefix}label")
+        if (!hasCustomData && id !in 0..2) {
+            return null
+        }
+        val defaultDef = when (id) {
+            0 -> HostProfile(0, "Pi (Tailscale)", "raspberrypi", 22, "pi", AuthType.KEY)
+            1 -> HostProfile(1, "Pi (Local LAN)", "192.168.1.100", 22, "pi", AuthType.KEY)
+            2 -> HostProfile(2, "Pi #2 (Tailscale)", "100.100.100.100", 22, "pi", AuthType.PASSWORD)
+            else -> HostProfile(id, "Host ${id + 1}", "", 22, "pi", AuthType.KEY)
+        }
+
+        val authName = prefs.getString("${prefix}authType", defaultDef.authType.name) ?: defaultDef.authType.name
+        val authType = runCatching { AuthType.valueOf(authName) }.getOrDefault(defaultDef.authType)
+
+        return HostProfile(
+            id = id,
+            label = prefs.getString("${prefix}label", defaultDef.label) ?: defaultDef.label,
+            host = prefs.getString("${prefix}host", defaultDef.host) ?: defaultDef.host,
+            port = prefs.getInt("${prefix}port", defaultDef.port),
+            username = prefs.getString("${prefix}username", defaultDef.username) ?: defaultDef.username,
+            authType = authType,
+            password = KeyStoreCrypto.decrypt(prefs.getString("${prefix}password", "") ?: ""),
+            privateKey = KeyStoreCrypto.decrypt(prefs.getString("${prefix}privateKey", "") ?: ""),
+            passphrase = KeyStoreCrypto.decrypt(prefs.getString("${prefix}passphrase", "") ?: "")
+        )
     }
 
     private fun saveProfileToPrefs(profile: HostProfile) {
         val prefix = "profile_${profile.id}_"
-        prefs.edit()
+        val editor = prefs.edit()
             .putString("${prefix}label", profile.label.trim())
             .putString("${prefix}host", profile.host.trim())
             .putInt("${prefix}port", profile.port.coerceIn(1, 65535))
@@ -1020,12 +1231,37 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
             .putString("${prefix}privateKey", KeyStoreCrypto.encrypt(profile.privateKey))
             .putString("${prefix}passphrase", KeyStoreCrypto.encrypt(profile.passphrase))
             .putInt(KEY_SELECTED_PROFILE, profile.id)
-            .apply()
+
+        val currentIds = getStoredProfileIds().toMutableList()
+        if (!currentIds.contains(profile.id)) {
+            currentIds.add(profile.id)
+            editor.putString(KEY_PROFILE_IDS, currentIds.joinToString(","))
+        }
+        editor.apply()
+    }
+
+    private fun deleteProfileFromPrefs(profileId: Int) {
+        val prefix = "profile_${profileId}_"
+        val editor = prefs.edit()
+        editor.remove("${prefix}label")
+        editor.remove("${prefix}host")
+        editor.remove("${prefix}port")
+        editor.remove("${prefix}username")
+        editor.remove("${prefix}authType")
+        editor.remove("${prefix}password")
+        editor.remove("${prefix}privateKey")
+        editor.remove("${prefix}passphrase")
+
+        val currentIds = getStoredProfileIds().filter { it != profileId }
+        editor.putString(KEY_PROFILE_IDS, currentIds.joinToString(","))
+        editor.apply()
     }
 
     companion object {
         private const val PREFS_NAME = "pissh_host_profiles"
         private const val KEY_SELECTED_PROFILE = "selected_profile_index"
+        private const val KEY_PROFILE_IDS = "profile_ids"
+        private const val KEY_NEXT_PROFILE_ID = "next_profile_id"
         const val MIN_FONT_SIZE_SP = 9f
         const val MAX_FONT_SIZE_SP = 15f
     }

@@ -175,10 +175,14 @@ class MainActivity : ComponentActivity() {
                     } else {
                         ConnectionScreen(
                             uiState = uiState,
-                            onSelectProfile = viewModel::selectProfile,
+                            onAddProfile = viewModel::startCreateProfile,
+                            onEditProfile = viewModel::startEditProfile,
+                            onCancelEdit = viewModel::closeEditor,
+                            onDeleteProfile = viewModel::deleteProfile,
                             onUpdateProfile = viewModel::updateActiveProfile,
                             onSaveProfile = viewModel::saveActiveProfile,
                             onDismissSaveSuccess = viewModel::dismissSaveSuccess,
+                            onConnectProfile = viewModel::connectProfile,
                             onConnect = viewModel::connect,
                             onToggleKeepScreenOn = viewModel::toggleKeepScreenOn
                         )

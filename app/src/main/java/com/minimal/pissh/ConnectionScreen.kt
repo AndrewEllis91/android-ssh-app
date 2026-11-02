@@ -1,6 +1,7 @@
 package com.minimal.pissh
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -11,10 +12,10 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,20 +26,26 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Clear
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Terminal
@@ -55,6 +62,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeTopAppBar
@@ -92,22 +100,461 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConnectionScreen(
     uiState: TerminalUiState,
-    onSelectProfile: (Int) -> Unit,
+    onAddProfile: () -> Unit = {},
+    onEditProfile: (Int) -> Unit = {},
+    onCancelEdit: () -> Unit = {},
+    onDeleteProfile: (Int) -> Unit = {},
     onUpdateProfile: ((HostProfile) -> HostProfile) -> Unit,
     onSaveProfile: () -> Unit,
     onConnect: () -> Unit,
+    onConnectProfile: (Int) -> Unit = {},
     onToggleKeepScreenOn: () -> Unit = {},
     onDismissSaveSuccess: () -> Unit = {}
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (uiState.isEditorOpen) {
+            ConnectionEditorScreen(
+                uiState = uiState,
+                onCancelEdit = onCancelEdit,
+                onDeleteProfile = onDeleteProfile,
+                onUpdateProfile = onUpdateProfile,
+                onSaveProfile = onSaveProfile,
+                onConnect = onConnect,
+                onToggleKeepScreenOn = onToggleKeepScreenOn
+            )
+        } else {
+            ConnectionListScreen(
+                uiState = uiState,
+                onAddProfile = onAddProfile,
+                onEditProfile = onEditProfile,
+                onConnectProfile = onConnectProfile
+            )
+        }
+
+        // Green Pop-up Dialogue / Floating Confirmation Pill
+        AnimatedVisibility(
+            visible = !uiState.saveSuccessMessage.isNullOrBlank(),
+            enter = fadeIn(animationSpec = tween(220)) + slideInVertically(
+                animationSpec = tween(250),
+                initialOffsetY = { fullHeight -> fullHeight / 2 }
+            ),
+            exit = fadeOut(animationSpec = tween(220)) + slideOutVertically(
+                animationSpec = tween(250),
+                targetOffsetY = { fullHeight -> fullHeight / 2 }
+            ),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .imePadding()
+                .padding(bottom = 16.dp, start = 16.dp, end = 16.dp)
+        ) {
+            SaveSuccessPopUp(
+                message = uiState.saveSuccessMessage.orEmpty(),
+                onDismiss = onDismissSaveSuccess
+            )
+        }
+    }
+}
+
+/**
+ * Default State: Vertical list of saved SSH host connections with per-item Edit and Connect buttons,
+ * and a bottom-right Floating Action Button (+) to add new connections.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ConnectionListScreen(
+    uiState: TerminalUiState,
+    onAddProfile: () -> Unit,
+    onEditProfile: (Int) -> Unit,
+    onConnectProfile: (Int) -> Unit
+) {
+    val haptics = LocalHapticFeedback.current
+    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+
+    Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            LargeTopAppBar(
+                title = {
+                    Text(
+                        text = "Connections",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                },
+                scrollBehavior = scrollBehavior,
+                colors = TopAppBarDefaults.largeTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer
+                )
+            )
+        },
+        floatingActionButton = {
+            FloatingActionButton(
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onAddProfile()
+                },
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "Add Connection")
+            }
+        }
+    ) { innerPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+            contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 96.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // Status / Error Banners
+            if (!uiState.errorMessage.isNullOrBlank()) {
+                item(key = "error_banner") {
+                    Card(
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = uiState.errorMessage,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            } else if (!uiState.statusMessage.isNullOrBlank()) {
+                item(key = "status_banner") {
+                    Card(
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = uiState.statusMessage,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (uiState.profiles.isEmpty()) {
+                item(key = "empty_state") {
+                    ElevatedCard(
+                        shape = RoundedCornerShape(24.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        colors = CardDefaults.elevatedCardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainer
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(28.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                modifier = Modifier.size(56.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Dns,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                            }
+                            Text(
+                                text = "No Saved Connections",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "Tap the + button below to add your first SSH connection.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            } else {
+                items(
+                    items = uiState.profiles,
+                    key = { it.id }
+                ) { profile ->
+                    val isThisConnecting = uiState.connectionStatus == ConnectionStatus.CONNECTING &&
+                        uiState.connectingProfileId == profile.id
+                    val isAnyConnecting = uiState.connectionStatus == ConnectionStatus.CONNECTING
+
+                    ConnectionListItemCard(
+                        profile = profile,
+                        isConnecting = isThisConnecting,
+                        isAnyConnecting = isAnyConnecting,
+                        onEdit = { onEditProfile(profile.id) },
+                        onConnect = { onConnectProfile(profile.id) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Vertical list item card showing connection title, monospace user@host:port, auth badge,
+ * and distinct buttons for "Edit" and "Connect".
+ */
+@Composable
+private fun ConnectionListItemCard(
+    profile: HostProfile,
+    isConnecting: Boolean,
+    isAnyConnecting: Boolean,
+    onEdit: () -> Unit,
+    onConnect: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val haptics = LocalHapticFeedback.current
+
+    ElevatedCard(
+        shape = RoundedCornerShape(24.dp),
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // Profile Header Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Outlined.Dns,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text(
+                        text = profile.label.ifBlank { "Host ${profile.id + 1}" },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${profile.username}@${if (profile.host.isNotBlank()) profile.host else "no host"}:${profile.port}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // Auth Pill Badge
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (profile.authType == AuthType.KEY) Icons.Outlined.Key else Icons.Default.Lock,
+                            contentDescription = null,
+                            modifier = Modifier.size(12.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = if (profile.authType == AuthType.KEY) "Key" else "Password",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // Action Buttons: Edit and Connect
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        onEdit()
+                    },
+                    enabled = !isAnyConnecting,
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier
+                        .weight(0.40f)
+                        .height(44.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Edit,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Edit",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Button(
+                    onClick = {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onConnect()
+                    },
+                    enabled = !isAnyConnecting && profile.host.isNotBlank() && profile.username.isNotBlank(),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    ),
+                    modifier = Modifier
+                        .weight(0.60f)
+                        .height(44.dp)
+                ) {
+                    if (isConnecting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "Connecting...",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = "Connect",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.18f),
+                                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.35f))
+                            ) {
+                                Text(
+                                    text = ">_",
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Add / Edit Connection View: Opens when the floating + button or an Edit button is pressed.
+ * Provides complete form inputs for General, Authentication, and Behavior/Terminal settings.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ConnectionEditorScreen(
+    uiState: TerminalUiState,
+    onCancelEdit: () -> Unit,
+    onDeleteProfile: (Int) -> Unit,
+    onUpdateProfile: ((HostProfile) -> HostProfile) -> Unit,
+    onSaveProfile: () -> Unit,
+    onConnect: () -> Unit,
+    onToggleKeepScreenOn: () -> Unit
 ) {
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val profile = uiState.activeProfile
     val isConnecting = uiState.connectionStatus == ConnectionStatus.CONNECTING
+
+    BackHandler(enabled = !isConnecting) {
+        onCancelEdit()
+    }
 
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
@@ -138,15 +585,22 @@ fun ConnectionScreen(
             LargeTopAppBar(
                 title = {
                     Text(
-                        text = profile.label.ifBlank { "New Connection" },
+                        text = if (uiState.isCreatingNewProfile) {
+                            "New Connection"
+                        } else {
+                            profile.label.ifBlank { "Edit Connection" }
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         fontWeight = FontWeight.SemiBold
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = { /* Home or root */ }) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    IconButton(
+                        onClick = onCancelEdit,
+                        enabled = !isConnecting
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
@@ -208,6 +662,27 @@ fun ConnectionScreen(
                                     onUpdateProfile { it.copy(host = "", port = 22) }
                                 }
                             )
+                            if (!uiState.isCreatingNewProfile) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = "Delete Connection",
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.Delete,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        onDeleteProfile(profile.id)
+                                    }
+                                )
+                            }
                         }
                     }
                 },
@@ -312,7 +787,6 @@ fun ConnectionScreen(
                                     fontWeight = FontWeight.SemiBold
                                 )
                                 Spacer(Modifier.width(8.dp))
-                                // Terminal prompt badge icon matching screenshot
                                 Surface(
                                     shape = RoundedCornerShape(6.dp),
                                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.18f),
@@ -334,59 +808,15 @@ fun ConnectionScreen(
             }
         }
     ) { innerPadding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .imePadding()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-            // Saved Profiles Carousel (Single-tap switching across 4 slots)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                uiState.profiles.forEachIndexed { index, item ->
-                    val isSelected = index == uiState.selectedProfileIndex
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            onSelectProfile(index)
-                        },
-                        enabled = !isConnecting,
-                        shape = RoundedCornerShape(20.dp),
-                        label = {
-                            Text(
-                                text = item.label.ifBlank { "Host ${index + 1}" },
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        },
-                        leadingIcon = {
-                            if (isSelected) {
-                                Icon(Icons.Default.Check, contentDescription = null, Modifier.size(16.dp))
-                            } else {
-                                Icon(Icons.Outlined.Dns, contentDescription = null, Modifier.size(16.dp))
-                            }
-                        },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                            selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    )
-                }
-            }
-
             // 1. General Card (Target Host & Port)
             ElevatedCard(
                 shape = RoundedCornerShape(28.dp),
@@ -670,7 +1100,7 @@ fun ConnectionScreen(
                         )
                     }
 
-                    // Terminal Emulation Dropdown Pill matching screenshot
+                    // Terminal Emulation Dropdown Pill
                     Box(modifier = Modifier.fillMaxWidth()) {
                         Surface(
                             shape = RoundedCornerShape(20.dp),
@@ -788,30 +1218,7 @@ fun ConnectionScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
         }
-
-        // Green Pop-up Dialogue / Floating Confirmation Pill
-        AnimatedVisibility(
-            visible = !uiState.saveSuccessMessage.isNullOrBlank(),
-            enter = fadeIn(animationSpec = tween(220)) + slideInVertically(
-                animationSpec = tween(250),
-                initialOffsetY = { fullHeight -> fullHeight / 2 }
-            ),
-            exit = fadeOut(animationSpec = tween(220)) + slideOutVertically(
-                animationSpec = tween(250),
-                targetOffsetY = { fullHeight -> fullHeight / 2 }
-            ),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .imePadding()
-                .padding(bottom = 16.dp, start = 16.dp, end = 16.dp)
-        ) {
-            SaveSuccessPopUp(
-                message = uiState.saveSuccessMessage.orEmpty(),
-                onDismiss = onDismissSaveSuccess
-            )
-        }
     }
-}
 }
 
 /**
