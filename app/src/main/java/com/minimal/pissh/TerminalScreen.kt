@@ -2,6 +2,7 @@ package com.minimal.pissh
 
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -45,8 +47,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
@@ -59,12 +65,15 @@ import androidx.compose.ui.input.key.utf16CodePoint
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -72,10 +81,13 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlin.math.ceil
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -126,6 +138,7 @@ fun TerminalScreen(
         }
     }
 
+    val density = LocalDensity.current
     val lineHeightSp = (uiState.fontSizeSp * 1.28f)
     val terminalTextStyle = remember(uiState.fontSizeSp) {
         TextStyle(
@@ -136,28 +149,50 @@ fun TerminalScreen(
         )
     }
 
-    // Dynamically measure monospace cell dimensions and notify SSH PTY (SIGWINCH)
-    LaunchedEffect(viewportSize, uiState.fontSizeSp) {
-        if (viewportSize.width > 0 && viewportSize.height > 0) {
-            val sampleLayout = textMeasurer.measure(
-                text = "MMMMMMMMMM",
-                style = terminalTextStyle
-            )
-            val charWidthPx = (sampleLayout.size.width / 10f).coerceAtLeast(4f)
-            val charHeightPx = sampleLayout.size.height.toFloat().coerceAtLeast(8f)
+    val cellMetrics = remember(uiState.fontSizeSp, density) {
+        val sampleLayout = textMeasurer.measure(
+            text = "M".repeat(100),
+            style = terminalTextStyle,
+            softWrap = false,
+            maxLines = 1
+        )
+        val widthPx = (sampleLayout.size.width / 100f).coerceAtLeast(4f)
+        val heightPx = sampleLayout.size.height.toFloat().coerceAtLeast(8f)
+        widthPx to heightPx
+    }
+    val charWidthPx = cellMetrics.first
+    val charHeightPx = cellMetrics.second
+    val charHeightDp = with(density) { ceil(charHeightPx).toDp() }
 
+    var hasReportedInitialGeometry by remember { mutableStateOf(false) }
+
+    // Dynamically measure monospace cell dimensions and notify SSH PTY (SIGWINCH)
+    LaunchedEffect(viewportSize, charWidthPx, charHeightPx) {
+        if (viewportSize.width > 0 && viewportSize.height > 0) {
+            if (hasReportedInitialGeometry) {
+                // Debounce rapid resize events during soft keyboard (IME) animations
+                delay(100)
+            }
             val cols = (viewportSize.width / charWidthPx).toInt().coerceAtLeast(20)
             val rows = (viewportSize.height / charHeightPx).toInt().coerceAtLeast(5)
+            hasReportedInitialGeometry = true
             onTerminalGeometryChanged(cols, rows, viewportSize.width, viewportSize.height)
         }
     }
 
-    // Auto-scroll when new terminal lines arrive or when cursor row moves
-    LaunchedEffect(uiState.terminalLines.size, uiState.terminalLines.lastOrNull(), uiState.cursorRow) {
+    // Keep the active terminal viewport anchored without jumping when TUI tools move the cursor
+    LaunchedEffect(
+        uiState.terminalLines.size,
+        uiState.terminalLines.lastOrNull(),
+        uiState.cursorRow,
+        viewportSize.height
+    ) {
         if (uiState.terminalLines.isNotEmpty()) {
-            val targetIndex = uiState.cursorRow.coerceIn(0, uiState.terminalLines.lastIndex)
-            if (targetIndex >= uiState.terminalLines.size - 2) {
-                listState.scrollToItem(uiState.terminalLines.lastIndex)
+            val lastIdx = uiState.terminalLines.lastIndex
+            val activeViewportStart = (uiState.terminalLines.size - uiState.ptyRows).coerceAtLeast(0)
+            val targetIndex = uiState.cursorRow.coerceIn(0, lastIdx)
+            if (targetIndex >= activeViewportStart) {
+                listState.scrollToItem(lastIdx)
             } else {
                 val visible = listState.layoutInfo.visibleItemsInfo.map { it.index }
                 if (visible.isNotEmpty() && targetIndex !in visible) {
@@ -273,7 +308,7 @@ fun TerminalScreen(
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 8.dp)
+                contentPadding = PaddingValues(bottom = 2.dp)
             ) {
                 itemsIndexed(uiState.terminalLines) { index, line ->
                     val isCursorLine = (index == uiState.cursorRow) && uiState.cursorVisible && cursorBlinkVisible
@@ -288,11 +323,12 @@ fun TerminalScreen(
                         line
                     }
 
-                    Text(
-                        text = displayLine,
-                        style = terminalTextStyle,
-                        softWrap = true,
-                        modifier = Modifier.fillMaxWidth()
+                    TerminalLineRow(
+                        line = displayLine,
+                        textMeasurer = textMeasurer,
+                        textStyle = terminalTextStyle,
+                        charWidthPx = charWidthPx,
+                        charHeightDp = charHeightDp
                     )
                 }
             }
@@ -569,5 +605,286 @@ fun buildLineWithCursor(
         builder.append('█')
         builder.pop()
         return builder.toAnnotatedString()
+    }
+}
+
+/**
+ * Renders a single terminal row locked to a strict monospace character grid ([charWidthPx] x [charHeightDp]).
+ * - Background spans fill exact cell bounds edge-to-edge without vertical line-height gaps.
+ * - Box-drawing (U+2500..U+257F) and Block Element (U+2580..U+259F) characters are drawn geometrically
+ *   inside their exact cell so fallback font widths never stretch lines or skew TUI borders/logos.
+ * - Non-ASCII symbols are anchored to their exact column offset so subsequent columns never drift.
+ */
+@Composable
+private fun TerminalLineRow(
+    line: AnnotatedString,
+    textMeasurer: TextMeasurer,
+    textStyle: TextStyle,
+    charWidthPx: Float,
+    charHeightDp: Dp
+) {
+    if (line.text.isEmpty() && line.spanStyles.isEmpty()) {
+        Spacer(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(charHeightDp)
+        )
+        return
+    }
+
+    Canvas(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(charHeightDp)
+    ) {
+        val rowHeight = size.height
+        val text = line.text
+
+        // 1. Draw cell background spans edge-to-edge
+        for (span in line.spanStyles) {
+            val bg = span.item.background
+            if (bg != Color.Unspecified && bg != Color.Transparent && span.end > span.start) {
+                val left = span.start * charWidthPx
+                val width = (span.end - span.start) * charWidthPx
+                if (left < size.width) {
+                    drawRect(
+                        color = bg,
+                        topLeft = Offset(left, 0f),
+                        size = Size(width.coerceAtMost(size.width - left), rowHeight)
+                    )
+                }
+            }
+        }
+
+        if (text.isEmpty()) return@Canvas
+
+        // 2. Draw foreground glyphs and geometric box/block elements locked to column cells
+        var col = 0
+        val len = text.length
+        while (col < len) {
+            val x = col * charWidthPx
+            if (x >= size.width) break
+
+            val ch = text[col]
+            val code = ch.code
+            if (code in 0x2500..0x259F) {
+                val fgColor = resolveFgColorAt(line, col, textStyle.color)
+                drawBoxOrBlockChar(
+                    ch = ch,
+                    left = x,
+                    top = 0f,
+                    width = charWidthPx,
+                    height = rowHeight,
+                    color = fgColor
+                )
+                col++
+            } else if (code in 0x20..0x7E) {
+                var runEnd = col + 1
+                var allSpaces = (ch == ' ')
+                while (runEnd < len) {
+                    val c = text[runEnd]
+                    if (c.code !in 0x20..0x7E) break
+                    if (c != ' ') allSpaces = false
+                    runEnd++
+                }
+                val hasDecorations = line.spanStyles.any {
+                    it.start < runEnd && it.end > col &&
+                        it.item.textDecoration != null &&
+                        it.item.textDecoration != TextDecoration.None
+                }
+                if (!allSpaces || hasDecorations) {
+                    val sub = sliceWithoutBackground(line, col, runEnd)
+                    drawText(
+                        textMeasurer = textMeasurer,
+                        text = sub,
+                        topLeft = Offset(x, 0f),
+                        style = textStyle,
+                        softWrap = false,
+                        maxLines = 1
+                    )
+                }
+                col = runEnd
+            } else {
+                val charCount = if (Character.isHighSurrogate(ch) && col + 1 < len && Character.isLowSurrogate(text[col + 1])) {
+                    2
+                } else {
+                    1
+                }
+                val sub = sliceWithoutBackground(line, col, col + charCount)
+                drawText(
+                    textMeasurer = textMeasurer,
+                    text = sub,
+                    topLeft = Offset(x, 0f),
+                    style = textStyle,
+                    softWrap = false,
+                    maxLines = 1
+                )
+                col += charCount
+            }
+        }
+    }
+}
+
+private fun resolveFgColorAt(line: AnnotatedString, index: Int, defaultColor: Color): Color {
+    var resolved = defaultColor
+    for (span in line.spanStyles) {
+        if (index in span.start until span.end && span.item.color != Color.Unspecified) {
+            resolved = span.item.color
+        }
+    }
+    return resolved
+}
+
+private fun sliceWithoutBackground(line: AnnotatedString, start: Int, end: Int): AnnotatedString {
+    val subText = line.text.substring(start, end)
+    val builder = AnnotatedString.Builder(subText)
+    for (span in line.spanStyles) {
+        if (span.start < end && span.end > start) {
+            val clampedStart = (span.start - start).coerceIn(0, subText.length)
+            val clampedEnd = (span.end - start).coerceIn(0, subText.length)
+            if (clampedEnd > clampedStart) {
+                builder.addStyle(
+                    span.item.copy(background = Color.Unspecified),
+                    clampedStart,
+                    clampedEnd
+                )
+            }
+        }
+    }
+    return builder.toAnnotatedString()
+}
+
+private fun DrawScope.drawBoxOrBlockChar(
+    ch: Char,
+    left: Float,
+    top: Float,
+    width: Float,
+    height: Float,
+    color: Color
+) {
+    val code = ch.code
+    if (code in 0x2580..0x259F) {
+        val hw = width * 0.5f
+        val hh = height * 0.5f
+        when (code) {
+            0x2580 -> drawRect(color, Offset(left, top), Size(width, hh)) // ▀ Upper half
+            in 0x2581..0x2587 -> { // ▁▂▃▄▅▆▇ Lower 1/8..7/8
+                val frac = (code - 0x2580) / 8f
+                val h = height * frac
+                drawRect(color, Offset(left, top + height - h), Size(width, h))
+            }
+            0x2588 -> drawRect(color, Offset(left, top), Size(width, height)) // █ Full block
+            in 0x2589..0x258F -> { // ▉▊▋▌▍▎▏ Left 7/8..1/8
+                val frac = (0x2590 - code) / 8f
+                drawRect(color, Offset(left, top), Size(width * frac, height))
+            }
+            0x2590 -> drawRect(color, Offset(left + hw, top), Size(hw, height)) // ▐ Right half
+            0x2591 -> drawRect(color.copy(alpha = color.alpha * 0.25f), Offset(left, top), Size(width, height)) // ░
+            0x2592 -> drawRect(color.copy(alpha = color.alpha * 0.50f), Offset(left, top), Size(width, height)) // ▒
+            0x2593 -> drawRect(color.copy(alpha = color.alpha * 0.75f), Offset(left, top), Size(width, height)) // ▓
+            0x2594 -> drawRect(color, Offset(left, top), Size(width, height * 0.125f)) // ▔ Upper 1/8
+            0x2595 -> drawRect(color, Offset(left + width * 0.875f, top), Size(width * 0.125f, height)) // ▕ Right 1/8
+            in 0x2596..0x259F -> { // Quadrant blocks ▖▗▘▙▚▛▜▝▞▟ (bit 0=UL, 1=UR, 2=LL, 3=LR)
+                val mask = when (code) {
+                    0x2596 -> 0b0100
+                    0x2597 -> 0b1000
+                    0x2598 -> 0b0001
+                    0x2599 -> 0b1101
+                    0x259A -> 0b1001
+                    0x259B -> 0b0111
+                    0x259C -> 0b1011
+                    0x259D -> 0b0010
+                    0x259E -> 0b0110
+                    0x259F -> 0b1110
+                    else -> 0
+                }
+                if ((mask and 1) != 0) drawRect(color, Offset(left, top), Size(hw, hh))
+                if ((mask and 2) != 0) drawRect(color, Offset(left + hw, top), Size(width - hw, hh))
+                if ((mask and 4) != 0) drawRect(color, Offset(left, top + hh), Size(hw, height - hh))
+                if ((mask and 8) != 0) drawRect(color, Offset(left + hw, top + hh), Size(width - hw, height - hh))
+            }
+        }
+        return
+    }
+
+    // Box Drawing (U+2500..U+257F)
+    val cx = left + width * 0.5f
+    val cy = top + height * 0.5f
+    val right = left + width
+    val bottom = top + height
+    val light = (width * 0.10f).coerceAtLeast(1.5f)
+    val heavy = (width * 0.20f).coerceAtLeast(3.0f)
+
+    when (code) {
+        0x2571 -> { // ╱
+            drawLine(color, Offset(right, top), Offset(left, bottom), strokeWidth = light)
+            return
+        }
+        0x2572 -> { // ╲
+            drawLine(color, Offset(left, top), Offset(right, bottom), strokeWidth = light)
+            return
+        }
+        0x2573 -> { // ╳
+            drawLine(color, Offset(right, top), Offset(left, bottom), strokeWidth = light)
+            drawLine(color, Offset(left, top), Offset(right, bottom), strokeWidth = light)
+            return
+        }
+    }
+
+    // Segment weights: 0 = none, 1 = light, 2 = heavy
+    var l = 0
+    var r = 0
+    var u = 0
+    var d = 0
+
+    when (code) {
+        0x2500, 0x2504, 0x2508, 0x254C -> { l = 1; r = 1 }
+        0x2501, 0x2505, 0x2509, 0x254D, 0x2550 -> { l = 2; r = 2 }
+        0x2502, 0x2506, 0x250A, 0x254E -> { u = 1; d = 1 }
+        0x2503, 0x2507, 0x250B, 0x254F, 0x2551 -> { u = 2; d = 2 }
+        0x250C, 0x256D -> { r = 1; d = 1 } // ┌ ╭
+        0x250D, 0x250E, 0x250F, 0x2552, 0x2553, 0x2554 -> { r = 2; d = 2 } // ┏ ╔
+        0x2510, 0x256E -> { l = 1; d = 1 } // ┐ ╮
+        0x2511, 0x2512, 0x2513, 0x2555, 0x2556, 0x2557 -> { l = 2; d = 2 } // ┓ ╗
+        0x2514, 0x2570 -> { r = 1; u = 1 } // └ ╰
+        0x2515, 0x2516, 0x2517, 0x2558, 0x2559, 0x255A -> { r = 2; u = 2 } // ┗ ╚
+        0x2518, 0x256F -> { l = 1; u = 1 } // ┘ ╯
+        0x2519, 0x251A, 0x251B, 0x255B, 0x255C, 0x255D -> { l = 2; u = 2 } // ┛ ╝
+        0x251C -> { u = 1; d = 1; r = 1 } // ├
+        in 0x251D..0x2523, in 0x255E..0x2560 -> { u = 2; d = 2; r = 2 } // ┣ ╠
+        0x2524 -> { u = 1; d = 1; l = 1 } // ┤
+        in 0x2525..0x252B, in 0x2561..0x2563 -> { u = 2; d = 2; l = 2 } // ┫ ╣
+        0x252C -> { l = 1; r = 1; d = 1 } // ┬
+        in 0x252D..0x2533, in 0x2564..0x2566 -> { l = 2; r = 2; d = 2 } // ┳ ╦
+        0x2534 -> { l = 1; r = 1; u = 1 } // ┴
+        in 0x2535..0x253B, in 0x2567..0x2569 -> { l = 2; r = 2; u = 2 } // ┻ ╩
+        0x253C -> { l = 1; r = 1; u = 1; d = 1 } // ┼
+        in 0x253D..0x254B, in 0x256A..0x256C -> { l = 2; r = 2; u = 2; d = 2 } // ╋ ╬
+        0x2574 -> l = 1
+        0x2575 -> u = 1
+        0x2576 -> r = 1
+        0x2577 -> d = 1
+        0x2578 -> l = 2
+        0x2579 -> u = 2
+        0x257A -> r = 2
+        0x257B -> d = 2
+        0x257C -> { l = 1; r = 2 }
+        0x257D -> { u = 1; d = 2 }
+        0x257E -> { l = 2; r = 1 }
+        0x257F -> { u = 2; d = 1 }
+        else -> { l = 1; r = 1 }
+    }
+
+    if (l > 0) {
+        drawLine(color, Offset(left, cy), Offset(cx, cy), strokeWidth = if (l == 2) heavy else light, cap = StrokeCap.Square)
+    }
+    if (r > 0) {
+        drawLine(color, Offset(cx, cy), Offset(right, cy), strokeWidth = if (r == 2) heavy else light, cap = StrokeCap.Square)
+    }
+    if (u > 0) {
+        drawLine(color, Offset(cx, top), Offset(cx, cy), strokeWidth = if (u == 2) heavy else light, cap = StrokeCap.Square)
+    }
+    if (d > 0) {
+        drawLine(color, Offset(cx, cy), Offset(cx, bottom), strokeWidth = if (d == 2) heavy else light, cap = StrokeCap.Square)
     }
 }

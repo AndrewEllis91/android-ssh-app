@@ -198,4 +198,87 @@ class AnsiTerminalBufferTest {
         assertNotNull(spaceCursorSpan)
         assertEquals(cursorColor, spaceCursorSpan?.item?.color)
     }
+
+    @Test
+    fun `handles VT100 delayed auto-wrap without double-wrapping exact width divider lines`() {
+        val buffer = AnsiTerminalBuffer(initialCols = 55, initialRows = 50)
+        val divider = "─".repeat(55)
+        // Exact 55-col divider followed by \r\n should stay on 1 row, not wrap into 2 rows
+        val lines = buffer.appendBytes("$divider\r\n> jhfjf\r\n$divider".toByteArray(Charsets.UTF_8))
+        assertEquals(listOf(divider, "> jhfjf", divider), lines.map { it.text })
+        assertEquals(2, buffer.currentCursorRow)
+        assertEquals(54, buffer.currentCursorCol)
+    }
+
+    @Test
+    fun `wraps lines exceeding terminal width and keeps relative cursor-up math aligned`() {
+        val buffer = AnsiTerminalBuffer(initialCols = 20, initialRows = 10)
+        // 30 chars on a 20-col terminal wraps into row 0 (20 chars) and row 1 (10 chars)
+        buffer.appendBytes(("A".repeat(20) + "B".repeat(10)).toByteArray(Charsets.UTF_8))
+        assertEquals(1, buffer.currentCursorRow)
+        assertEquals(10, buffer.currentCursorCol)
+
+        // Moving up 1 row returns to row 0
+        val lines = buffer.appendBytes("\u001B[1A\rX".toByteArray(Charsets.UTF_8))
+        assertEquals(0, buffer.currentCursorRow)
+        assertEquals("X" + "A".repeat(19), lines[0].text)
+        assertEquals("B".repeat(10), lines[1].text)
+    }
+
+    @Test
+    fun `handles TUI redraw cycles with CSI J, CSI B, and CSI 2K without cursor drift`() {
+        val buffer = AnsiTerminalBuffer(initialCols = 55, initialRows = 50)
+        val border = "─".repeat(55)
+        // Frame 1: draw top border, input prompt, bottom border, blank line (via CSI B), and footer, then move cursor up to prompt
+        val frame1 = "$border\r\n> j\r\n$border\r\n\u001B[1BGemini 3.8 Flash\u001B[3A\u001B[4G"
+        buffer.appendBytes(frame1.toByteArray(Charsets.UTF_8))
+        assertEquals(1, buffer.currentCursorRow)
+        assertEquals(3, buffer.currentCursorCol)
+
+        // Frame 2: TUI moves to top of block, erases to end of screen (CSI J), and redraws with CSI B for blank line
+        val frame2 = "\u001B[1A\r\u001B[J$border\r\n> jh\r\n$border\r\n\u001B[1BGemini 3.8 Flash\u001B[3A\u001B[5G"
+        val lines = buffer.appendBytes(frame2.toByteArray(Charsets.UTF_8))
+        assertEquals(listOf(border, "> jh", border, "", "Gemini 3.8 Flash"), lines.map { it.text })
+        assertEquals(1, buffer.currentCursorRow)
+        assertEquals(4, buffer.currentCursorCol)
+
+        // CSI 2K erases line without resetting cursorCol
+        buffer.appendBytes("\u001B[2K".toByteArray(Charsets.UTF_8))
+        assertEquals(4, buffer.currentCursorCol)
+    }
+
+    @Test
+    fun `parses 24-bit TrueColor foreground and background without triggering faint or reset codes`() {
+        val buffer = AnsiTerminalBuffer()
+        // TrueColor fg (255, 128, 0) and TrueColor bg (20, 40, 60) — note '2' and '0' inside RGB params!
+        val seq = "\u001B[38;2;255;128;0;48;2;20;40;60mLogo\u001B[0m"
+        val lines = buffer.appendBytes(seq.toByteArray(Charsets.UTF_8))
+        assertEquals("Logo", lines[0].text)
+        val span = lines[0].spanStyles.firstOrNull()
+        assertNotNull(span)
+        assertEquals(Color(255, 128, 0), span?.item?.color)
+        assertEquals(Color(20, 40, 60), span?.item?.background)
+    }
+
+    @Test
+    fun `replies to DSR 6n cursor position query and supports alternate screen buffer`() {
+        val buffer = AnsiTerminalBuffer(initialCols = 55, initialRows = 50)
+        var dsrReply: String? = null
+        buffer.onResponse = { bytes -> dsrReply = String(bytes, Charsets.UTF_8) }
+
+        buffer.appendBytes("shell line 1\r\npi$ ".toByteArray(Charsets.UTF_8))
+        buffer.appendBytes("\u001B[6n".toByteArray(Charsets.UTF_8))
+        assertEquals("\u001B[2;5R", dsrReply)
+
+        // Enter alternate screen (?1049h), draw TUI, then exit (?1049l) and verify shell history restored
+        val altLines = buffer.appendBytes("\u001B[?1049h\u001B[Hhtop running".toByteArray(Charsets.UTF_8))
+        assertTrue(buffer.isInAltScreen)
+        assertEquals(listOf("htop running"), altLines.map { it.text })
+
+        val restoredLines = buffer.appendBytes("\u001B[?1049l".toByteArray(Charsets.UTF_8))
+        assertFalse(buffer.isInAltScreen)
+        assertEquals(listOf("shell line 1", "pi$ "), restoredLines.map { it.text })
+        assertEquals(1, buffer.currentCursorRow)
+        assertEquals(4, buffer.currentCursorCol)
+    }
 }

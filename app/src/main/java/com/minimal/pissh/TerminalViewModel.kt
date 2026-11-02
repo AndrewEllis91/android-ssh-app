@@ -6,6 +6,7 @@ import android.content.Intent
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.TypedValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -144,14 +145,18 @@ object KeyStoreCrypto {
 }
 
 val DefaultTerminalFgColor = Color(0xFFE6EDF3)
+val DefaultTerminalBgColor = Color(0xFF0D1117)
 val FaintTerminalFgColor = Color(0xFF6E7681) // Grey for zsh autosuggestions
 
 data class AnsiStyle(
     val color: Color = DefaultTerminalFgColor,
+    val background: Color = Color.Unspecified,
     val bold: Boolean = false,
     val faint: Boolean = false,
     val italic: Boolean = false,
-    val underline: Boolean = false
+    val underline: Boolean = false,
+    val inverse: Boolean = false,
+    val strikethrough: Boolean = false
 )
 
 class TerminalLine(
@@ -164,6 +169,15 @@ class TerminalLine(
         isDirty = true
     }
 
+    fun copyFrom(other: TerminalLine) {
+        chars.setLength(0)
+        chars.append(other.chars)
+        styles.clear()
+        styles.addAll(other.styles)
+        isDirty = true
+        cachedAnnotatedString = null
+    }
+
     fun getAnnotatedString(): AnnotatedString {
         if (isDirty || cachedAnnotatedString == null) {
             cachedAnnotatedString = AnsiTerminalBuffer.buildAnnotatedString(chars, styles)
@@ -174,11 +188,16 @@ class TerminalLine(
 }
 
 /**
- * Stateful UTF-8 and VT100/ANSI escape sequence processor.
- * Accurately processes 16-color, 256-color, bold, and faint text styling (used by zsh-autosuggestions),
- * carriage returns, backspaces, screen redrawing without wiping scrollback, and cursor position tracking.
+ * Stateful UTF-8 and VT100/ANSI/xterm escape sequence processor.
+ * Supports 16-color, 256-color, 24-bit TrueColor foreground & background, inverse video,
+ * VT100 delayed auto-wrap (DECAWM), viewport-relative addressing, scroll regions (DECSTBM),
+ * alternate screen buffer (?1049h/?1049l), synchronized output (?2026h/?2026l), and DSR replies.
  */
-class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
+class AnsiTerminalBuffer(
+    private val maxLines: Int = 2000,
+    initialCols: Int = 80,
+    initialRows: Int = 24
+) {
 
     private enum class ParserState {
         NORMAL,
@@ -195,17 +214,40 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
 
     private var leftoverBytes = ByteArray(0)
     private var state = ParserState.NORMAL
-    private val csiParams = StringBuilder(32)
+    private val csiParams = StringBuilder(256)
 
     private val lines = ArrayList<TerminalLine>(maxLines).apply {
         add(TerminalLine())
     }
+    private var cols = initialCols.coerceIn(20, 500)
+    private var rows = initialRows.coerceIn(5, 200)
+    private var viewportTop = 0
+    private var scrollTop = 0
+    private var scrollBottom = rows - 1
+
     private var cursorRow = 0
     private var cursorCol = 0
     private var cursorVisible = true
+    private var autoWrapMode = true
+    private var pendingWrap = false
+    private var applicationCursorKeys = false
+    private var synchronizedOutput = false
     private var savedCursorRow = 0
     private var savedCursorCol = 0
     private var currentStyle = AnsiStyle()
+
+    // Alternate screen buffer state (?1049h / ?47h / ?1047h)
+    private var inAltScreen = false
+    private val mainScreenLines = ArrayList<TerminalLine>()
+    private var mainCursorRow = 0
+    private var mainCursorCol = 0
+    private var mainViewportTop = 0
+    private var mainSavedCursorRow = 0
+    private var mainSavedCursorCol = 0
+    private var mainStyle = AnsiStyle()
+    private var mainPendingWrap = false
+
+    var onResponse: ((ByteArray) -> Unit)? = null
 
     val currentCursorRow: Int
         @Synchronized get() = cursorRow
@@ -216,11 +258,64 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
     val isCursorVisible: Boolean
         @Synchronized get() = cursorVisible
 
+    val isSynchronizedOutput: Boolean
+        @Synchronized get() = synchronizedOutput
+
+    val isApplicationCursorKeys: Boolean
+        @Synchronized get() = applicationCursorKeys
+
+    val isInAltScreen: Boolean
+        @Synchronized get() = inAltScreen
+
+    @Synchronized
+    fun resize(newCols: Int, newRows: Int) {
+        val safeCols = newCols.coerceIn(20, 500)
+        val safeRows = newRows.coerceIn(5, 200)
+        if (cols == safeCols && rows == safeRows) return
+        cols = safeCols
+        rows = safeRows
+        scrollTop = 0
+        scrollBottom = rows - 1
+        pendingWrap = false
+        if (!inAltScreen) {
+            if (cursorRow >= viewportTop + rows) {
+                viewportTop = (cursorRow - rows + 1).coerceAtLeast(0)
+            }
+        } else {
+            viewportTop = 0
+            cursorRow = cursorRow.coerceIn(0, rows - 1)
+        }
+        cursorCol = cursorCol.coerceIn(0, cols - 1)
+    }
+
     private fun getOrCreateLine(row: Int): TerminalLine {
-        while (lines.size <= row) {
+        val safeRow = row.coerceAtLeast(0)
+        while (lines.size <= safeRow) {
             lines.add(TerminalLine())
         }
-        return lines[row]
+        return lines[safeRow]
+    }
+
+    private fun updateViewportForCursor() {
+        if (!inAltScreen && cursorRow >= viewportTop + rows) {
+            viewportTop = cursorRow - rows + 1
+        }
+    }
+
+    private fun trimScrollbackIfNeeded() {
+        if (inAltScreen) {
+            while (lines.size > rows) {
+                lines.removeAt(lines.size - 1)
+            }
+            cursorRow = cursorRow.coerceIn(0, (rows - 1).coerceAtLeast(0))
+            return
+        }
+        while (lines.size > maxLines) {
+            lines.removeAt(0)
+            cursorRow = (cursorRow - 1).coerceAtLeast(0)
+            savedCursorRow = (savedCursorRow - 1).coerceAtLeast(0)
+            viewportTop = (viewportTop - 1).coerceAtLeast(0)
+        }
     }
 
     @Synchronized
@@ -261,9 +356,18 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
     fun clear(): List<AnnotatedString> {
         lines.clear()
         lines.add(TerminalLine())
+        mainScreenLines.clear()
+        inAltScreen = false
+        viewportTop = 0
+        scrollTop = 0
+        scrollBottom = rows - 1
         cursorRow = 0
         cursorCol = 0
         cursorVisible = true
+        autoWrapMode = true
+        pendingWrap = false
+        applicationCursorKeys = false
+        synchronizedOutput = false
         savedCursorRow = 0
         savedCursorCol = 0
         currentStyle = AnsiStyle()
@@ -292,7 +396,7 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
                 ParserState.ESC -> handleEscChar(ch)
                 ParserState.CSI -> handleCsiChar(ch)
                 ParserState.OSC -> {
-                    if (ch == '\u0007') {
+                    if (ch == '\u0007' || ch == '\u009C') {
                         state = ParserState.NORMAL
                     } else if (ch == '\u001B') {
                         state = ParserState.OSC_ESC
@@ -311,25 +415,28 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
     private fun handleNormalChar(ch: Char) {
         when (ch) {
             '\u001B' -> state = ParserState.ESC
-            '\r' -> cursorCol = 0
-            '\n' -> {
-                cursorRow++
-                getOrCreateLine(cursorRow)
-                while (lines.size > maxLines) {
-                    lines.removeAt(0)
-                    cursorRow = (cursorRow - 1).coerceAtLeast(0)
-                    savedCursorRow = (savedCursorRow - 1).coerceAtLeast(0)
-                }
+            '\r' -> {
+                pendingWrap = false
+                cursorCol = 0
+            }
+            '\n', '\u000B', '\u000C' -> {
+                pendingWrap = false
+                advanceLineFeed()
                 cursorCol = 0
             }
             '\b' -> {
+                pendingWrap = false
                 if (cursorCol > 0) cursorCol--
             }
             '\t' -> {
-                val spaces = 4 - (cursorCol % 4)
-                repeat(spaces) { writePrintable(' ') }
+                pendingWrap = false
+                val spaces = 8 - (cursorCol % 8)
+                val targetCol = (cursorCol + spaces).coerceAtMost(cols - 1)
+                while (cursorCol < targetCol) {
+                    writePrintable(' ')
+                }
             }
-            '\u0007' -> Unit // Ignore terminal bell
+            '\u0007', '\u000E', '\u000F' -> Unit // Ignore bell & shift-in/shift-out
             else -> {
                 if (ch >= ' ') {
                     writePrintable(ch)
@@ -338,21 +445,152 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
         }
     }
 
+    private fun isZeroWidthChar(ch: Char): Boolean {
+        val code = ch.code
+        if (code in 0x200B..0x200F || code in 0xFE00..0xFE0F || code == 0xFEFF) {
+            return true
+        }
+        val type = Character.getType(ch).toByte()
+        return type == Character.NON_SPACING_MARK ||
+            type == Character.ENCLOSING_MARK ||
+            type == Character.FORMAT
+    }
+
     private fun writePrintable(ch: Char) {
+        if (isZeroWidthChar(ch)) return
+
+        if (pendingWrap && autoWrapMode) {
+            pendingWrap = false
+            advanceLineFeed()
+            cursorCol = 0
+        }
+
         val line = getOrCreateLine(cursorRow)
         line.markDirty()
-        while (line.chars.length < cursorCol) {
+        val writeCol = if (autoWrapMode) cursorCol.coerceAtMost(cols - 1) else cursorCol
+        while (line.chars.length < writeCol) {
             line.chars.append(' ')
             line.styles.add(AnsiStyle())
         }
-        if (cursorCol < line.chars.length) {
-            line.chars.setCharAt(cursorCol, ch)
-            line.styles[cursorCol] = currentStyle
+        if (writeCol < line.chars.length) {
+            line.chars.setCharAt(writeCol, ch)
+            line.styles[writeCol] = currentStyle
         } else {
             line.chars.append(ch)
             line.styles.add(currentStyle)
         }
-        cursorCol++
+
+        if (autoWrapMode && writeCol >= cols - 1) {
+            cursorCol = cols - 1
+            pendingWrap = true
+        } else {
+            cursorCol = writeCol + 1
+        }
+    }
+
+    private fun advanceLineFeed() {
+        val hasCustomScrollRegion = scrollTop > 0 || scrollBottom < rows - 1
+        val bottomRow = viewportTop + scrollBottom
+        if ((inAltScreen || hasCustomScrollRegion) && cursorRow == bottomRow) {
+            scrollRegionUp(1)
+        } else {
+            cursorRow++
+            if (inAltScreen && cursorRow >= viewportTop + rows) {
+                cursorRow = viewportTop + rows - 1
+                scrollRegionUp(1)
+            } else {
+                getOrCreateLine(cursorRow)
+                updateViewportForCursor()
+                trimScrollbackIfNeeded()
+            }
+        }
+    }
+
+    private fun reverseLineFeed() {
+        pendingWrap = false
+        val topRow = viewportTop + scrollTop
+        if (cursorRow == topRow) {
+            scrollRegionDown(1)
+        } else if (cursorRow > 0) {
+            cursorRow--
+        }
+    }
+
+    private fun scrollRegionUp(count: Int) {
+        val top = (viewportTop + scrollTop).coerceAtLeast(0)
+        val bottom = (viewportTop + scrollBottom).coerceAtLeast(top)
+        getOrCreateLine(bottom)
+        val n = count.coerceIn(1, bottom - top + 1)
+        repeat(n) {
+            if (top < lines.size) {
+                lines.removeAt(top)
+            }
+            val insertIdx = bottom.coerceAtMost(lines.size)
+            lines.add(insertIdx, TerminalLine())
+        }
+    }
+
+    private fun scrollRegionDown(count: Int) {
+        val top = (viewportTop + scrollTop).coerceAtLeast(0)
+        val bottom = (viewportTop + scrollBottom).coerceAtLeast(top)
+        getOrCreateLine(bottom)
+        val n = count.coerceIn(1, bottom - top + 1)
+        repeat(n) {
+            if (bottom < lines.size) {
+                lines.removeAt(bottom)
+            }
+            val insertIdx = top.coerceAtMost(lines.size)
+            lines.add(insertIdx, TerminalLine())
+        }
+    }
+
+    private fun enterAltScreen() {
+        if (inAltScreen) return
+        inAltScreen = true
+        mainScreenLines.clear()
+        for (line in lines) {
+            mainScreenLines.add(TerminalLine().apply { copyFrom(line) })
+        }
+        mainCursorRow = cursorRow
+        mainCursorCol = cursorCol
+        mainViewportTop = viewportTop
+        mainSavedCursorRow = savedCursorRow
+        mainSavedCursorCol = savedCursorCol
+        mainStyle = currentStyle
+        mainPendingWrap = pendingWrap
+
+        lines.clear()
+        lines.add(TerminalLine())
+        viewportTop = 0
+        scrollTop = 0
+        scrollBottom = rows - 1
+        cursorRow = 0
+        cursorCol = 0
+        pendingWrap = false
+    }
+
+    private fun exitAltScreen() {
+        if (!inAltScreen) return
+        inAltScreen = false
+        lines.clear()
+        if (mainScreenLines.isEmpty()) {
+            lines.add(TerminalLine())
+        } else {
+            for (line in mainScreenLines) {
+                lines.add(line)
+            }
+        }
+        mainScreenLines.clear()
+        viewportTop = mainViewportTop.coerceIn(0, (lines.size - 1).coerceAtLeast(0))
+        scrollTop = 0
+        scrollBottom = rows - 1
+        cursorRow = mainCursorRow.coerceAtLeast(0)
+        getOrCreateLine(cursorRow)
+        cursorCol = mainCursorCol.coerceAtLeast(0)
+        savedCursorRow = mainSavedCursorRow
+        savedCursorCol = mainSavedCursorCol
+        currentStyle = mainStyle
+        pendingWrap = mainPendingWrap
     }
 
     private fun handleEscChar(ch: Char) {
@@ -361,97 +599,163 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
                 csiParams.setLength(0)
                 state = ParserState.CSI
             }
-            ']' -> state = ParserState.OSC
+            ']', 'P', '_', '^', 'X' -> state = ParserState.OSC
             '(', ')', '*', '+' -> state = ParserState.CHARSET
             '7' -> {
-                savedCursorRow = cursorRow
+                savedCursorRow = cursorRow - viewportTop
                 savedCursorCol = cursorCol
                 state = ParserState.NORMAL
             }
             '8' -> {
-                cursorRow = savedCursorRow.coerceIn(0, (lines.size - 1).coerceAtLeast(0))
+                cursorRow = (viewportTop + savedCursorRow).coerceAtLeast(0)
+                getOrCreateLine(cursorRow)
+                updateViewportForCursor()
                 cursorCol = savedCursorCol.coerceAtLeast(0)
+                pendingWrap = false
+                state = ParserState.NORMAL
+            }
+            'D' -> {
+                // IND (Index): Move cursor down 1 line keeping column
+                pendingWrap = false
+                advanceLineFeed()
+                state = ParserState.NORMAL
+            }
+            'E' -> {
+                // NEL (Next Line): Move cursor down 1 line and to column 0
+                pendingWrap = false
+                advanceLineFeed()
+                cursorCol = 0
+                state = ParserState.NORMAL
+            }
+            'M' -> {
+                // RI (Reverse Index): Move cursor up 1 line, scrolling down if at top margin
+                reverseLineFeed()
                 state = ParserState.NORMAL
             }
             'c' -> {
                 // Full terminal reset (RIS)
-                lines.clear()
-                lines.add(TerminalLine())
-                cursorRow = 0
-                cursorCol = 0
-                cursorVisible = true
-                savedCursorRow = 0
-                savedCursorCol = 0
-                currentStyle = AnsiStyle()
-                state = ParserState.NORMAL
+                clear()
             }
             else -> state = ParserState.NORMAL
         }
     }
 
     private fun handleCsiChar(ch: Char) {
+        if (ch == '\u001B') {
+            // Interrupted CSI sequence: start new ESC sequence immediately
+            csiParams.setLength(0)
+            state = ParserState.ESC
+            return
+        }
         if (ch.code in 0x40..0x7E) {
-            val params = csiParams.toString()
+            val rawParams = csiParams.toString()
+            val isPrivate = rawParams.startsWith("?")
+            val cleanParams = rawParams.trimStart('?', '>', '!', ' ').trimEnd(' ', '$', '\'', '"')
+
             when (ch) {
-                'm' -> handleSgr(params)
+                'm' -> if (!isPrivate) handleSgr(cleanParams)
                 'A' -> {
-                    val count = (params.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
                     cursorRow = (cursorRow - count).coerceAtLeast(0)
                 }
                 'B' -> {
-                    val count = (params.toIntOrNull() ?: 1).coerceAtLeast(1)
-                    cursorRow = (cursorRow + count).coerceAtMost((lines.size - 1).coerceAtLeast(0))
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    val maxRow = if (inAltScreen) viewportTop + rows - 1 else Int.MAX_VALUE
+                    cursorRow = (cursorRow + count).coerceAtMost(maxRow)
+                    getOrCreateLine(cursorRow)
+                    updateViewportForCursor()
+                    trimScrollbackIfNeeded()
                 }
-                'C' -> {
-                    val count = (params.toIntOrNull() ?: 1).coerceAtLeast(1)
-                    cursorCol += count
+                'C', 'a' -> {
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    cursorCol = (cursorCol + count).coerceAtMost(cols - 1)
                 }
                 'D' -> {
-                    val count = (params.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
                     cursorCol = (cursorCol - count).coerceAtLeast(0)
                 }
                 'E' -> {
-                    val count = (params.toIntOrNull() ?: 1).coerceAtLeast(1)
-                    cursorRow = (cursorRow + count).coerceAtMost((lines.size - 1).coerceAtLeast(0))
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    val maxRow = if (inAltScreen) viewportTop + rows - 1 else Int.MAX_VALUE
+                    cursorRow = (cursorRow + count).coerceAtMost(maxRow)
+                    getOrCreateLine(cursorRow)
+                    updateViewportForCursor()
+                    trimScrollbackIfNeeded()
                     cursorCol = 0
                 }
                 'F' -> {
-                    val count = (params.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
                     cursorRow = (cursorRow - count).coerceAtLeast(0)
                     cursorCol = 0
                 }
-                'G' -> {
-                    cursorCol = (params.toIntOrNull() ?: 1).coerceAtLeast(1) - 1
+                'G', '`' -> {
+                    pendingWrap = false
+                    cursorCol = ((cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1) - 1).coerceAtMost(cols - 1)
                 }
                 'd' -> {
-                    val targetRow = (params.toIntOrNull() ?: 1).coerceAtLeast(1) - 1
+                    pendingWrap = false
+                    val relRow = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1) - 1
+                    val targetRow = viewportTop + relRow
                     getOrCreateLine(targetRow)
                     cursorRow = targetRow
+                    updateViewportForCursor()
+                    trimScrollbackIfNeeded()
                 }
                 'H', 'f' -> {
-                    if (params.isEmpty() || params == ";") {
-                        cursorRow = 0
+                    pendingWrap = false
+                    if (cleanParams.isEmpty() || cleanParams == ";") {
+                        cursorRow = viewportTop
+                        getOrCreateLine(cursorRow)
                         cursorCol = 0
                     } else {
-                        val parts = params.split(';')
-                        val row = (parts.getOrNull(0)?.toIntOrNull() ?: 1).coerceAtLeast(1) - 1
+                        val parts = cleanParams.split(';')
+                        val relRow = (parts.getOrNull(0)?.toIntOrNull() ?: 1).coerceAtLeast(1) - 1
                         val col = (parts.getOrNull(1)?.toIntOrNull() ?: 1).coerceAtLeast(1) - 1
-                        getOrCreateLine(row)
-                        cursorRow = row
-                        cursorCol = col
+                        val targetRow = viewportTop + relRow
+                        getOrCreateLine(targetRow)
+                        cursorRow = targetRow
+                        cursorCol = col.coerceAtMost(cols - 1)
+                        updateViewportForCursor()
+                        trimScrollbackIfNeeded()
                     }
                 }
                 'J' -> {
-                    when (params) {
+                    pendingWrap = false
+                    when (cleanParams) {
                         "2", "3" -> {
-                            // Clear visible screen / scrollback
                             lines.clear()
                             lines.add(TerminalLine())
+                            viewportTop = 0
                             cursorRow = 0
                             cursorCol = 0
                         }
+                        "1" -> {
+                            // Erase from start of screen (viewportTop) up to cursor inclusive
+                            for (r in viewportTop until cursorRow.coerceAtMost(lines.size)) {
+                                lines[r].chars.setLength(0)
+                                lines[r].styles.clear()
+                                lines[r].markDirty()
+                            }
+                            if (cursorRow < lines.size) {
+                                val line = lines[cursorRow]
+                                line.markDirty()
+                                val limit = (cursorCol + 1).coerceAtMost(line.chars.length)
+                                for (c in 0 until limit) {
+                                    line.chars.setCharAt(c, ' ')
+                                    if (c < line.styles.size) {
+                                        line.styles[c] = AnsiStyle(background = currentStyle.background)
+                                    }
+                                }
+                            }
+                        }
                         else -> {
-                            // "0" or empty: Erase from cursor to end of screen.
+                            // "0" or empty: Erase from cursor to end of screen (preserving scrollback above cursorRow)
                             if (cursorRow < lines.size) {
                                 val line = lines[cursorRow]
                                 line.markDirty()
@@ -469,7 +773,8 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
                     }
                 }
                 'K' -> {
-                    val mode = params.ifEmpty { "0" }
+                    pendingWrap = false
+                    val mode = cleanParams.ifEmpty { "0" }
                     if (cursorRow < lines.size) {
                         val line = lines[cursorRow]
                         line.markDirty()
@@ -483,23 +788,50 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
                                 }
                             }
                             "1" -> {
-                                for (col in 0 until cursorCol.coerceAtMost(line.chars.length)) {
+                                val limit = (cursorCol + 1).coerceAtMost(line.chars.length)
+                                for (col in 0 until limit) {
                                     line.chars.setCharAt(col, ' ')
                                     if (col < line.styles.size) {
-                                        line.styles[col] = AnsiStyle()
+                                        line.styles[col] = AnsiStyle(background = currentStyle.background)
                                     }
                                 }
                             }
                             "2" -> {
                                 line.chars.setLength(0)
                                 line.styles.clear()
-                                cursorCol = 0
+                                // Per VT100/ECMA-48 spec, EL 2 does NOT move cursorCol
+                            }
+                        }
+                    }
+                }
+                '@' -> {
+                    // ICH: Insert blank characters at cursor
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    if (cursorRow < lines.size) {
+                        val line = lines[cursorRow]
+                        line.markDirty()
+                        while (line.chars.length < cursorCol) {
+                            line.chars.append(' ')
+                            line.styles.add(AnsiStyle())
+                        }
+                        val blankStyle = AnsiStyle(background = currentStyle.background)
+                        repeat(count) {
+                            line.chars.insert(cursorCol, ' ')
+                            line.styles.add(cursorCol, blankStyle)
+                        }
+                        if (line.chars.length > cols) {
+                            line.chars.setLength(cols)
+                            while (line.styles.size > cols) {
+                                line.styles.removeAt(line.styles.size - 1)
                             }
                         }
                     }
                 }
                 'P' -> {
-                    val count = (params.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    // DCH: Delete characters at cursor
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
                     if (cursorRow < lines.size) {
                         val line = lines[cursorRow]
                         line.markDirty()
@@ -514,24 +846,135 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
                         }
                     }
                 }
+                'X' -> {
+                    // ECH: Erase characters in place without moving cursor
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    val line = getOrCreateLine(cursorRow)
+                    line.markDirty()
+                    val endCol = (cursorCol + count).coerceAtMost(cols)
+                    while (line.chars.length < endCol) {
+                        line.chars.append(' ')
+                        line.styles.add(AnsiStyle())
+                    }
+                    val blankStyle = AnsiStyle(background = currentStyle.background)
+                    for (c in cursorCol until endCol) {
+                        line.chars.setCharAt(c, ' ')
+                        line.styles[c] = blankStyle
+                    }
+                }
+                'L' -> {
+                    // IL: Insert blank lines at cursor row
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    val bottom = (viewportTop + scrollBottom).coerceAtLeast(cursorRow)
+                    getOrCreateLine(bottom)
+                    repeat(count.coerceAtMost(bottom - cursorRow + 1)) {
+                        if (bottom < lines.size) {
+                            lines.removeAt(bottom)
+                        }
+                        lines.add(cursorRow.coerceAtMost(lines.size), TerminalLine())
+                    }
+                }
+                'M' -> {
+                    // DL: Delete lines at cursor row
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    val bottom = (viewportTop + scrollBottom).coerceAtLeast(cursorRow)
+                    getOrCreateLine(bottom)
+                    repeat(count.coerceAtMost(bottom - cursorRow + 1)) {
+                        if (cursorRow < lines.size) {
+                            lines.removeAt(cursorRow)
+                        }
+                        lines.add(bottom.coerceAtMost(lines.size), TerminalLine())
+                    }
+                }
+                'S' -> {
+                    // SU: Scroll up
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    scrollRegionUp(count)
+                }
+                'T' -> {
+                    // SD: Scroll down
+                    pendingWrap = false
+                    val count = (cleanParams.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    scrollRegionDown(count)
+                }
+                'r' -> {
+                    // DECSTBM: Set top and bottom margins
+                    pendingWrap = false
+                    if (!isPrivate) {
+                        if (cleanParams.isEmpty()) {
+                            scrollTop = 0
+                            scrollBottom = rows - 1
+                        } else {
+                            val parts = cleanParams.split(';')
+                            val top = ((parts.getOrNull(0)?.toIntOrNull() ?: 1).coerceAtLeast(1) - 1).coerceIn(0, rows - 1)
+                            val bottom = ((parts.getOrNull(1)?.toIntOrNull() ?: rows).coerceAtLeast(1) - 1).coerceIn(top, rows - 1)
+                            scrollTop = top
+                            scrollBottom = bottom
+                        }
+                        cursorRow = viewportTop
+                        getOrCreateLine(cursorRow)
+                        cursorCol = 0
+                    }
+                }
                 's' -> {
-                    savedCursorRow = cursorRow
-                    savedCursorCol = cursorCol
+                    if (!isPrivate) {
+                        savedCursorRow = cursorRow - viewportTop
+                        savedCursorCol = cursorCol
+                    }
                 }
                 'u' -> {
-                    cursorRow = savedCursorRow.coerceIn(0, (lines.size - 1).coerceAtLeast(0))
-                    cursorCol = savedCursorCol.coerceAtLeast(0)
+                    if (!isPrivate) {
+                        cursorRow = (viewportTop + savedCursorRow).coerceAtLeast(0)
+                        getOrCreateLine(cursorRow)
+                        updateViewportForCursor()
+                        cursorCol = savedCursorCol.coerceAtLeast(0)
+                        pendingWrap = false
+                    }
                 }
-                'h' -> {
-                    if (params == "?25") cursorVisible = true
+                'h', 'l' -> {
+                    val enabled = (ch == 'h')
+                    if (isPrivate) {
+                        val modes = cleanParams.split(';')
+                        for (mode in modes) {
+                            when (mode) {
+                                "1" -> applicationCursorKeys = enabled
+                                "7" -> autoWrapMode = enabled
+                                "25" -> cursorVisible = enabled
+                                "47", "1047", "1049" -> {
+                                    if (enabled) enterAltScreen() else exitAltScreen()
+                                }
+                                "2026" -> synchronizedOutput = enabled
+                            }
+                        }
+                    }
                 }
-                'l' -> {
-                    if (params == "?25") cursorVisible = false
+                'n' -> {
+                    // DSR: Device Status Report
+                    if (!isPrivate) {
+                        when (cleanParams) {
+                            "5" -> onResponse?.invoke("\u001B[0n".toByteArray(Charsets.UTF_8))
+                            "6" -> {
+                                val reportRow = (cursorRow - viewportTop + 1).coerceIn(1, rows)
+                                val reportCol = (cursorCol + 1).coerceIn(1, cols)
+                                onResponse?.invoke("\u001B[${reportRow};${reportCol}R".toByteArray(Charsets.UTF_8))
+                            }
+                        }
+                    }
+                }
+                'c' -> {
+                    // DA1: Primary Device Attributes
+                    if (!isPrivate && !rawParams.startsWith(">") && (cleanParams.isEmpty() || cleanParams == "0")) {
+                        onResponse?.invoke("\u001B[?1;2c".toByteArray(Charsets.UTF_8))
+                    }
                 }
             }
             state = ParserState.NORMAL
         } else {
-            if (csiParams.length < 32) {
+            if (csiParams.length < 256) {
                 csiParams.append(ch)
             }
         }
@@ -549,12 +992,26 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
             when (code) {
                 0 -> currentStyle = AnsiStyle()
                 1 -> currentStyle = currentStyle.copy(bold = true)
-                2 -> currentStyle = currentStyle.copy(faint = true, color = FaintTerminalFgColor)
+                2 -> {
+                    val newFg = if (currentStyle.color == DefaultTerminalFgColor) FaintTerminalFgColor else currentStyle.color
+                    currentStyle = currentStyle.copy(faint = true, color = newFg)
+                }
                 3 -> currentStyle = currentStyle.copy(italic = true)
                 4 -> currentStyle = currentStyle.copy(underline = true)
-                22 -> currentStyle = currentStyle.copy(bold = false, faint = false)
+                7 -> currentStyle = currentStyle.copy(inverse = true)
+                9 -> currentStyle = currentStyle.copy(strikethrough = true)
+                22 -> {
+                    val restoredFg = if (currentStyle.faint && currentStyle.color == FaintTerminalFgColor) {
+                        DefaultTerminalFgColor
+                    } else {
+                        currentStyle.color
+                    }
+                    currentStyle = currentStyle.copy(bold = false, faint = false, color = restoredFg)
+                }
                 23 -> currentStyle = currentStyle.copy(italic = false)
                 24 -> currentStyle = currentStyle.copy(underline = false)
+                27 -> currentStyle = currentStyle.copy(inverse = false)
+                29 -> currentStyle = currentStyle.copy(strikethrough = false)
                 30 -> currentStyle = currentStyle.copy(color = Color(0xFF484F58))
                 31 -> currentStyle = currentStyle.copy(color = Color(0xFFF85149))
                 32 -> currentStyle = currentStyle.copy(color = Color(0xFF3FB950))
@@ -563,7 +1020,16 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
                 35 -> currentStyle = currentStyle.copy(color = Color(0xFFBC8CFF))
                 36 -> currentStyle = currentStyle.copy(color = Color(0xFF39C5CF))
                 37 -> currentStyle = currentStyle.copy(color = Color(0xFFE6EDF3))
-                39 -> currentStyle = currentStyle.copy(color = DefaultTerminalFgColor)
+                39 -> currentStyle = currentStyle.copy(color = if (currentStyle.faint) FaintTerminalFgColor else DefaultTerminalFgColor)
+                40 -> currentStyle = currentStyle.copy(background = Color(0xFF484F58))
+                41 -> currentStyle = currentStyle.copy(background = Color(0xFFF85149))
+                42 -> currentStyle = currentStyle.copy(background = Color(0xFF3FB950))
+                43 -> currentStyle = currentStyle.copy(background = Color(0xFFD29922))
+                44 -> currentStyle = currentStyle.copy(background = Color(0xFF58A6FF))
+                45 -> currentStyle = currentStyle.copy(background = Color(0xFFBC8CFF))
+                46 -> currentStyle = currentStyle.copy(background = Color(0xFF39C5CF))
+                47 -> currentStyle = currentStyle.copy(background = Color(0xFFE6EDF3))
+                49 -> currentStyle = currentStyle.copy(background = Color.Unspecified)
                 90 -> currentStyle = currentStyle.copy(color = FaintTerminalFgColor) // Bright Black / Grey (zsh-autosuggestions)
                 91 -> currentStyle = currentStyle.copy(color = Color(0xFFFF7B72))
                 92 -> currentStyle = currentStyle.copy(color = Color(0xFF56D364))
@@ -572,11 +1038,40 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
                 95 -> currentStyle = currentStyle.copy(color = Color(0xFFD2A8FF))
                 96 -> currentStyle = currentStyle.copy(color = Color(0xFF56D4DD))
                 97 -> currentStyle = currentStyle.copy(color = Color(0xFFFFFFFF))
+                100 -> currentStyle = currentStyle.copy(background = FaintTerminalFgColor)
+                101 -> currentStyle = currentStyle.copy(background = Color(0xFFFF7B72))
+                102 -> currentStyle = currentStyle.copy(background = Color(0xFF56D364))
+                103 -> currentStyle = currentStyle.copy(background = Color(0xFFE3B341))
+                104 -> currentStyle = currentStyle.copy(background = Color(0xFF79C0FF))
+                105 -> currentStyle = currentStyle.copy(background = Color(0xFFD2A8FF))
+                106 -> currentStyle = currentStyle.copy(background = Color(0xFF56D4DD))
+                107 -> currentStyle = currentStyle.copy(background = Color(0xFFFFFFFF))
                 38 -> {
-                    if (i + 2 < tokens.size && tokens[i + 1] == "5") {
+                    val mode = tokens.getOrNull(i + 1)
+                    if (mode == "5" && i + 2 < tokens.size) {
                         val colorIdx = tokens[i + 2].toIntOrNull() ?: 0
                         currentStyle = currentStyle.copy(color = parse256Color(colorIdx))
                         i += 2
+                    } else if (mode == "2" && i + 4 < tokens.size) {
+                        val r = (tokens[i + 2].toIntOrNull() ?: 0).coerceIn(0, 255)
+                        val g = (tokens[i + 3].toIntOrNull() ?: 0).coerceIn(0, 255)
+                        val b = (tokens[i + 4].toIntOrNull() ?: 0).coerceIn(0, 255)
+                        currentStyle = currentStyle.copy(color = Color(r, g, b))
+                        i += 4
+                    }
+                }
+                48 -> {
+                    val mode = tokens.getOrNull(i + 1)
+                    if (mode == "5" && i + 2 < tokens.size) {
+                        val colorIdx = tokens[i + 2].toIntOrNull() ?: 0
+                        currentStyle = currentStyle.copy(background = parse256Color(colorIdx))
+                        i += 2
+                    } else if (mode == "2" && i + 4 < tokens.size) {
+                        val r = (tokens[i + 2].toIntOrNull() ?: 0).coerceIn(0, 255)
+                        val g = (tokens[i + 3].toIntOrNull() ?: 0).coerceIn(0, 255)
+                        val b = (tokens[i + 4].toIntOrNull() ?: 0).coerceIn(0, 255)
+                        currentStyle = currentStyle.copy(background = Color(r, g, b))
+                        i += 4
                     }
                 }
             }
@@ -649,16 +1144,37 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
         }
 
         private fun toSpanStyle(style: AnsiStyle): SpanStyle {
-            val effectiveColor = if (style.faint && style.color == DefaultTerminalFgColor) {
+            val baseFg = if (style.faint && style.color == DefaultTerminalFgColor) {
                 FaintTerminalFgColor
             } else {
                 style.color
             }
+            val baseBg = style.background
+            val effectiveFg = if (style.inverse) {
+                if (baseBg != Color.Unspecified) baseBg else DefaultTerminalBgColor
+            } else {
+                baseFg
+            }
+            val effectiveBg = if (style.inverse) {
+                baseFg
+            } else {
+                baseBg
+            }
+            val decorations = buildList {
+                if (style.underline) add(TextDecoration.Underline)
+                if (style.strikethrough) add(TextDecoration.LineThrough)
+            }
+            val textDecoration = if (decorations.isEmpty()) {
+                TextDecoration.None
+            } else {
+                TextDecoration.combine(decorations)
+            }
             return SpanStyle(
-                color = effectiveColor,
+                color = effectiveFg,
+                background = effectiveBg,
                 fontWeight = if (style.bold) FontWeight.Bold else FontWeight.Normal,
                 fontStyle = if (style.italic) FontStyle.Italic else FontStyle.Normal,
-                textDecoration = if (style.underline) TextDecoration.Underline else TextDecoration.None
+                textDecoration = textDecoration
             )
         }
 
@@ -679,7 +1195,11 @@ class AnsiTerminalBuffer(private val maxLines: Int = 2000) {
 class TerminalViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val terminalBuffer = AnsiTerminalBuffer(maxLines = 2000)
+    private val terminalBuffer = AnsiTerminalBuffer(maxLines = 2000).apply {
+        onResponse = { responseBytes ->
+            sendRawBytes(responseBytes)
+        }
+    }
 
     private val _uiState = MutableStateFlow(TerminalUiState())
     val uiState: StateFlow<TerminalUiState> = _uiState.asStateFlow()
@@ -687,15 +1207,43 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     private var boundService: SshForegroundService? = null
     private var streamCollectJob: Job? = null
     private var disconnectCollectJob: Job? = null
+    private var syncFlushJob: Job? = null
 
     init {
         val loadedProfiles = loadProfiles()
         val lastSelectedId = prefs.getInt(KEY_SELECTED_PROFILE, 0)
         val selectedIdx = loadedProfiles.indexOfFirst { it.id == lastSelectedId }.let { if (it >= 0) it else 0 }
+
+        val dm = application.resources.displayMetrics
+        val density = dm.density.coerceAtLeast(1f)
+        val fontPx = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 12f, dm).coerceAtLeast(10f)
+        val approxCharWidthPx = (fontPx * 0.6f).coerceAtLeast(6f)
+        val approxCharHeightPx = (fontPx * 1.28f).coerceAtLeast(12f)
+        val availWidthPx = (dm.widthPixels - (12f * density).toInt()).coerceAtLeast(200)
+        val availHeightPx = (dm.heightPixels - (120f * density).toInt()).coerceAtLeast(200)
+        val estCols = (availWidthPx / approxCharWidthPx).toInt().coerceIn(20, 500)
+        val estRows = (availHeightPx / approxCharHeightPx).toInt().coerceIn(5, 200)
+        terminalBuffer.resize(estCols, estRows)
+
         _uiState.update {
             it.copy(
                 profiles = loadedProfiles,
-                selectedProfileIndex = selectedIdx
+                selectedProfileIndex = selectedIdx,
+                ptyCols = estCols,
+                ptyRows = estRows,
+                ptyWidthPx = availWidthPx,
+                ptyHeightPx = availHeightPx
+            )
+        }
+    }
+
+    private fun publishTerminalSnapshot(lines: List<AnnotatedString> = terminalBuffer.snapshot()) {
+        _uiState.update {
+            it.copy(
+                terminalLines = lines,
+                cursorRow = terminalBuffer.currentCursorRow,
+                cursorCol = terminalBuffer.currentCursorCol,
+                cursorVisible = terminalBuffer.isCursorVisible
             )
         }
     }
@@ -710,13 +1258,16 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         streamCollectJob = viewModelScope.launch(Dispatchers.Default) {
             service.sshClient.incomingBytes.collect { bytes ->
                 val updatedLines = terminalBuffer.appendBytes(bytes)
-                _uiState.update {
-                    it.copy(
-                        terminalLines = updatedLines,
-                        cursorRow = terminalBuffer.currentCursorRow,
-                        cursorCol = terminalBuffer.currentCursorCol,
-                        cursorVisible = terminalBuffer.isCursorVisible
-                    )
+                if (terminalBuffer.isSynchronizedOutput) {
+                    if (syncFlushJob?.isActive != true) {
+                        syncFlushJob = viewModelScope.launch(Dispatchers.Default) {
+                            delay(50)
+                            publishTerminalSnapshot()
+                        }
+                    }
+                } else {
+                    syncFlushJob?.cancel()
+                    publishTerminalSnapshot(updatedLines)
                 }
             }
         }
@@ -1082,6 +1633,7 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     fun onTerminalGeometryChanged(cols: Int, rows: Int, widthPx: Int, heightPx: Int) {
         val safeCols = cols.coerceIn(20, 500)
         val safeRows = rows.coerceIn(5, 200)
+        terminalBuffer.resize(safeCols, safeRows)
         val current = _uiState.value
         if (current.ptyCols == safeCols &&
             current.ptyRows == safeRows &&
@@ -1137,7 +1689,20 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     fun sendVt100Sequence(sequence: String) {
         _uiState.update { it.copy(ctrlLatched = false) }
-        sendRawBytes(sequence.toByteArray(Charsets.UTF_8))
+        val effectiveSeq = if (terminalBuffer.isApplicationCursorKeys) {
+            when (sequence) {
+                "\u001B[A" -> "\u001BOA"
+                "\u001B[B" -> "\u001BOB"
+                "\u001B[C" -> "\u001BOC"
+                "\u001B[D" -> "\u001BOD"
+                "\u001B[H" -> "\u001BOH"
+                "\u001B[F" -> "\u001BOF"
+                else -> sequence
+            }
+        } else {
+            sequence
+        }
+        sendRawBytes(effectiveSeq.toByteArray(Charsets.UTF_8))
     }
 
     fun sendRawBytes(bytes: ByteArray) {

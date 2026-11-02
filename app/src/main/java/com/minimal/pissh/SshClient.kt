@@ -174,14 +174,29 @@ class SshClient(
 
     private fun startStreamReader(inputStream: InputStream) {
         readerJob = ioScope.launch {
-            val buffer = ByteArray(4096)
+            val buffer = ByteArray(16384)
             var errorMessage: String? = null
             try {
                 while (isActive) {
                     val bytesRead = inputStream.read(buffer)
                     if (bytesRead == -1) break
                     if (bytesRead > 0) {
-                        _incomingBytes.emit(buffer.copyOfRange(0, bytesRead))
+                        val available = runCatching { inputStream.available() }.getOrDefault(0)
+                        if (available <= 0) {
+                            _incomingBytes.emit(buffer.copyOfRange(0, bytesRead))
+                        } else {
+                            val out = java.io.ByteArrayOutputStream(bytesRead + available.coerceAtMost(49152))
+                            out.write(buffer, 0, bytesRead)
+                            while (out.size() < 65536) {
+                                val nextAvail = runCatching { inputStream.available() }.getOrDefault(0)
+                                if (nextAvail <= 0) break
+                                val toRead = minOf(buffer.size, nextAvail, 65536 - out.size())
+                                val extraRead = inputStream.read(buffer, 0, toRead)
+                                if (extraRead <= 0) break
+                                out.write(buffer, 0, extraRead)
+                            }
+                            _incomingBytes.emit(out.toByteArray())
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -213,8 +228,8 @@ class SshClient(
         }
     }
 
-    suspend fun sendRaw(bytes: ByteArray): Result<Unit> = withContext(Dispatchers.IO) {
-        writeMutex.withLock {
+    suspend fun sendRaw(bytes: ByteArray): Result<Unit> = writeMutex.withLock {
+        withContext(Dispatchers.IO) {
             runCatching {
                 val out = outputStream ?: error("SSH stream is not connected")
                 out.write(bytes)
