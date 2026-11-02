@@ -179,6 +179,8 @@ class MainActivity : ComponentActivity() {
                             onEditProfile = viewModel::startEditProfile,
                             onCancelEdit = viewModel::closeEditor,
                             onDeleteProfile = viewModel::deleteProfile,
+                            onMoveProfileUp = viewModel::moveProfileUp,
+                            onMoveProfileDown = viewModel::moveProfileDown,
                             onUpdateProfile = viewModel::updateActiveProfile,
                             onSaveProfile = viewModel::saveActiveProfile,
                             onDismissSaveSuccess = viewModel::dismissSaveSuccess,

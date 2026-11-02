@@ -810,6 +810,40 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun moveProfile(fromIndex: Int, toIndex: Int) {
+        val currentList = _uiState.value.profiles.toMutableList()
+        if (fromIndex !in currentList.indices || toIndex !in currentList.indices || fromIndex == toIndex) return
+        val item = currentList.removeAt(fromIndex)
+        currentList.add(toIndex, item)
+        prefs.edit().putString(KEY_PROFILE_IDS, currentList.joinToString(",") { it.id.toString() }).apply()
+        _uiState.update { state ->
+            val targetId = state.activeProfile.id
+            val newSelected = currentList.indexOfFirst { it.id == targetId }.let {
+                if (it >= 0) it else 0
+            }
+            state.copy(
+                profiles = currentList,
+                selectedProfileIndex = newSelected
+            )
+        }
+    }
+
+    fun moveProfileUp(profileId: Int) {
+        val list = _uiState.value.profiles
+        val idx = list.indexOfFirst { it.id == profileId }
+        if (idx > 0) {
+            moveProfile(idx, idx - 1)
+        }
+    }
+
+    fun moveProfileDown(profileId: Int) {
+        val list = _uiState.value.profiles
+        val idx = list.indexOfFirst { it.id == profileId }
+        if (idx in 0 until list.lastIndex) {
+            moveProfile(idx, idx + 1)
+        }
+    }
+
     fun connectProfile(profileId: Int) {
         val profiles = _uiState.value.profiles
         val index = profiles.indexOfFirst { it.id == profileId }

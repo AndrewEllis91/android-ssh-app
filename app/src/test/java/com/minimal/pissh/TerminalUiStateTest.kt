@@ -56,5 +56,35 @@ class TerminalUiStateTest {
         assertEquals("Server B", state.activeProfile.label)
         assertEquals("10.0.0.2", state.activeProfile.host)
     }
+
+    @Test
+    fun `reordering profiles updates the list order in state`() {
+        val p1 = HostProfile(id = 1, label = "P1", host = "1.1.1.1")
+        val p2 = HostProfile(id = 2, label = "P2", host = "2.2.2.2")
+        val p3 = HostProfile(id = 3, label = "P3", host = "3.3.3.3")
+        val state = TerminalUiState(profiles = listOf(p1, p2, p3))
+
+        val reordered = state.profiles.toMutableList().apply {
+            val item = removeAt(0)
+            add(1, item)
+        }
+        val updatedState = state.copy(profiles = reordered)
+        assertEquals(listOf(2, 1, 3), updatedState.profiles.map { it.id })
+    }
+
+    @Test
+    fun `deleting a profile removes it from state profiles list`() {
+        val p1 = HostProfile(id = 1, label = "P1", host = "1.1.1.1")
+        val p2 = HostProfile(id = 2, label = "P2", host = "2.2.2.2")
+        val state = TerminalUiState(profiles = listOf(p1, p2), selectedProfileIndex = 1)
+
+        val updatedProfiles = state.profiles.filter { it.id != 1 }
+        val updatedState = state.copy(
+            profiles = updatedProfiles,
+            selectedProfileIndex = 0
+        )
+        assertEquals(1, updatedState.profiles.size)
+        assertEquals(2, updatedState.profiles.first().id)
+    }
 }
 

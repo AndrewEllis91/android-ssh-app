@@ -27,7 +27,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -35,11 +35,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Clear
@@ -50,6 +53,7 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -63,6 +67,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeTopAppBar
@@ -107,6 +112,8 @@ fun ConnectionScreen(
     onEditProfile: (Int) -> Unit = {},
     onCancelEdit: () -> Unit = {},
     onDeleteProfile: (Int) -> Unit = {},
+    onMoveProfileUp: (Int) -> Unit = {},
+    onMoveProfileDown: (Int) -> Unit = {},
     onUpdateProfile: ((HostProfile) -> HostProfile) -> Unit,
     onSaveProfile: () -> Unit,
     onConnect: () -> Unit,
@@ -130,7 +137,10 @@ fun ConnectionScreen(
                 uiState = uiState,
                 onAddProfile = onAddProfile,
                 onEditProfile = onEditProfile,
-                onConnectProfile = onConnectProfile
+                onConnectProfile = onConnectProfile,
+                onDeleteProfile = onDeleteProfile,
+                onMoveProfileUp = onMoveProfileUp,
+                onMoveProfileDown = onMoveProfileDown
             )
         }
 
@@ -160,7 +170,7 @@ fun ConnectionScreen(
 
 /**
  * Default State: Vertical list of saved SSH host connections with per-item Edit and Connect buttons,
- * and a bottom-right Floating Action Button (+) to add new connections.
+ * reorder controls, delete confirmation dialogs, and a bottom-right Floating Action Button (+) to add new connections.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -168,10 +178,16 @@ private fun ConnectionListScreen(
     uiState: TerminalUiState,
     onAddProfile: () -> Unit,
     onEditProfile: (Int) -> Unit,
-    onConnectProfile: (Int) -> Unit
+    onConnectProfile: (Int) -> Unit,
+    onDeleteProfile: (Int) -> Unit,
+    onMoveProfileUp: (Int) -> Unit,
+    onMoveProfileDown: (Int) -> Unit
 ) {
     val haptics = LocalHapticFeedback.current
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+
+    var isReorderMode by remember { mutableStateOf(false) }
+    var profilePendingDelete by remember { mutableStateOf<HostProfile?>(null) }
 
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
@@ -180,9 +196,23 @@ private fun ConnectionListScreen(
             LargeTopAppBar(
                 title = {
                     Text(
-                        text = "Connections",
+                        text = if (isReorderMode) "Reorder Connections" else "Connections",
                         fontWeight = FontWeight.SemiBold
                     )
+                },
+                actions = {
+                    if (uiState.profiles.size > 1) {
+                        IconButton(onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            isReorderMode = !isReorderMode
+                        }) {
+                            Icon(
+                                imageVector = Icons.Default.SwapVert,
+                                contentDescription = if (isReorderMode) "Exit Reorder Mode" else "Reorder Connections",
+                                tint = if (isReorderMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 },
                 scrollBehavior = scrollBehavior,
                 colors = TopAppBarDefaults.largeTopAppBarColors(
@@ -320,41 +350,98 @@ private fun ConnectionListScreen(
                     }
                 }
             } else {
-                items(
+                itemsIndexed(
                     items = uiState.profiles,
-                    key = { it.id }
-                ) { profile ->
+                    key = { _, profile -> profile.id }
+                ) { index, profile ->
                     val isThisConnecting = uiState.connectionStatus == ConnectionStatus.CONNECTING &&
                         uiState.connectingProfileId == profile.id
                     val isAnyConnecting = uiState.connectionStatus == ConnectionStatus.CONNECTING
 
                     ConnectionListItemCard(
                         profile = profile,
+                        canMoveUp = index > 0,
+                        canMoveDown = index < uiState.profiles.lastIndex,
+                        isReorderMode = isReorderMode,
                         isConnecting = isThisConnecting,
                         isAnyConnecting = isAnyConnecting,
                         onEdit = { onEditProfile(profile.id) },
-                        onConnect = { onConnectProfile(profile.id) }
+                        onConnect = { onConnectProfile(profile.id) },
+                        onMoveUp = { onMoveProfileUp(profile.id) },
+                        onMoveDown = { onMoveProfileDown(profile.id) },
+                        onDelete = { profilePendingDelete = profile }
                     )
                 }
             }
         }
     }
+
+    // Delete Confirmation Dialog
+    if (profilePendingDelete != null) {
+        val target = profilePendingDelete!!
+        AlertDialog(
+            onDismissRequest = { profilePendingDelete = null },
+            icon = {
+                Icon(
+                    imageVector = Icons.Outlined.Delete,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(28.dp)
+                )
+            },
+            title = {
+                Text(text = "Delete Connection?")
+            },
+            text = {
+                Text(
+                    text = "Are you sure you want to delete \"${target.label.ifBlank { "Host ${target.id + 1}" }}\"? This cannot be undone."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val id = target.id
+                        profilePendingDelete = null
+                        onDeleteProfile(id)
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { profilePendingDelete = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 /**
  * Vertical list item card showing connection title, monospace user@host:port, auth badge,
- * and distinct buttons for "Edit" and "Connect".
+ * overflow menu (Move Up, Move Down, Delete), reorder buttons, and "Edit" / "Connect" buttons.
  */
 @Composable
 private fun ConnectionListItemCard(
     profile: HostProfile,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    isReorderMode: Boolean,
     isConnecting: Boolean,
     isAnyConnecting: Boolean,
     onEdit: () -> Unit,
     onConnect: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onDelete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val haptics = LocalHapticFeedback.current
+    var showMenu by remember { mutableStateOf(false) }
 
     ElevatedCard(
         shape = RoundedCornerShape(24.dp),
@@ -434,6 +521,140 @@ private fun ConnectionListItemCard(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+
+                // Three-dot Options Menu for Move Up, Move Down, Delete
+                Box {
+                    IconButton(
+                        onClick = { showMenu = !showMenu },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "Connection Options",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { showMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Move Up") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.ArrowUpward,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            enabled = canMoveUp,
+                            onClick = {
+                                showMenu = false
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onMoveUp()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Move Down") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.ArrowDownward,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            enabled = canMoveDown,
+                            onClick = {
+                                showMenu = false
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onMoveDown()
+                            }
+                        )
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "Delete",
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Outlined.Delete,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            onClick = {
+                                showMenu = false
+                                onDelete()
+                            }
+                        )
+                    }
+                }
+            }
+
+            // Quick Reorder Toolbar Row (visible when Reorder Mode is toggled on)
+            if (isReorderMode) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Position Order",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilledTonalButton(
+                                onClick = {
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    onMoveUp()
+                                },
+                                enabled = canMoveUp,
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ArrowUpward,
+                                    contentDescription = "Move Up",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("Up", style = MaterialTheme.typography.labelSmall)
+                            }
+
+                            FilledTonalButton(
+                                onClick = {
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    onMoveDown()
+                                },
+                                enabled = canMoveDown,
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ArrowDownward,
+                                    contentDescription = "Move Down",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("Down", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
                     }
                 }
             }
@@ -563,6 +784,7 @@ private fun ConnectionEditorScreen(
     var portText by remember(profile.id) { mutableStateOf(profile.port.toString()) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showEmulationMenu by remember { mutableStateOf(false) }
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var selectedEmulation by remember { mutableStateOf("xterm-256color") }
 
     val keyFilePicker = rememberLauncherForActivityResult(
@@ -679,7 +901,7 @@ private fun ConnectionEditorScreen(
                                     },
                                     onClick = {
                                         showOverflowMenu = false
-                                        onDeleteProfile(profile.id)
+                                        showDeleteConfirmDialog = true
                                     }
                                 )
                             }
@@ -1218,6 +1440,48 @@ private fun ConnectionEditorScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
         }
+    }
+
+    // Delete Confirmation Dialog for Editor Screen
+    if (showDeleteConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmDialog = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Outlined.Delete,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(28.dp)
+                )
+            },
+            title = {
+                Text(text = "Delete Connection?")
+            },
+            text = {
+                Text(
+                    text = "Are you sure you want to delete \"${profile.label.ifBlank { "Host ${profile.id + 1}" }}\"? This cannot be undone."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteConfirmDialog = false
+                        onDeleteProfile(profile.id)
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
