@@ -11,8 +11,8 @@ android {
         applicationId = "com.minimal.pissh"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "1.0.9"
+        versionCode = 11
+        versionName = "1.0.10"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -25,7 +25,7 @@ android {
             if (keystoreFile != null && file(keystoreFile).exists()) {
                 storeFile = file(keystoreFile)
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("KEY_ALIAS")
+                keyAlias = System.getenv("KEY_ALIAS")?.trim()
                 keyPassword = System.getenv("KEY_PASSWORD")
             } else {
                 initWith(getByName("debug"))
