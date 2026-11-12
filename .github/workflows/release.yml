@@ -42,28 +42,16 @@ jobs:
       - name: Prepare Signing Keystore
         id: prepare_keystore
         run: |
-          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "Found custom signing secrets. Decoding keystore..."
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/release.keystore"
-            echo "KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
-          else
-            echo "No custom secrets provided. Generating release keystore..."
-            keytool -genkeypair -v -keystore "$RUNNER_TEMP/release.keystore" \
-              -alias pissh \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -storepass "PiSSHRelease2026" \
-              -keypass "PiSSHRelease2026" \
-              -dname "CN=AndrewEllis,OU=Personal,O=PiSSH,C=US"
-            echo "KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-            echo "KEYSTORE_PASSWORD=PiSSHRelease2026" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=pissh" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=PiSSHRelease2026" >> "$GITHUB_ENV"
+          if [ -z "${{ secrets.KEYSTORE_BASE64 }}" ] || [ -z "${{ secrets.KEYSTORE_PASSWORD }}" ] || [ -z "${{ secrets.KEY_ALIAS }}" ] || [ -z "${{ secrets.KEY_PASSWORD }}" ]; then
+            echo "::error::Missing release signing secrets! Please ensure KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD are configured in GitHub Repository Secrets."
+            exit 1
           fi
+          echo "Decoding release keystore..."
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
 
       - name: Build APKs (Release & Debug)
         run: ./gradlew assembleRelease assembleDebug --stacktrace
